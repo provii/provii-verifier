@@ -1,0 +1,10 @@
+{
+  "tier_id": "docs-sandbox-tier",
+  "description": "Stricter per-customer hourly tier for docs.provii.app.",
+  "limits": {
+    "challenge": 60,
+    "redeem": 120,
+    "status": 600
+  },
+  "updated_at": 1712966400
+}

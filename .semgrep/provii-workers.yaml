@@ -1,0 +1,329 @@
+rules:
+
+  # ============================================================================
+  # RULE 1: Direct == on secrets/tokens/HMACs (timing side-channel)
+  # ============================================================================
+  # All comparisons of secrets, tokens, HMACs, API keys must use constant-time
+  # comparison (ct_eq or hmac verify_slice). Direct == leaks information via
+  # timing differences.
+  - id: provii.workers.non-ct-secret-comparison
+    pattern-regex: '(?:secret|hmac|token|api_key|mac_tag|signature|auth_tag|service_token|mek|dek)\w*\s*==\s*(?:secret|hmac|token|api_key|mac_tag|signature|auth_tag|service_token|mek|dek)'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      Direct == comparison on values that appear to be secrets, tokens, or MACs.
+      Use ct_eq() or hmac::Mac::verify_slice() to prevent timing side-channels.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: timing-attack
+      cwe: "CWE-208: Observable Timing Discrepancy"
+
+  # ============================================================================
+  # RULE 2: Secret/key material in format strings
+  # ============================================================================
+  # Catches format!() calls that interpolate variables with secret-sounding names.
+  # This could leak key material into logs, error messages, or responses.
+  - id: provii.workers.secret-in-format-string
+    pattern-regex: 'format!\s*\([^)]*\{\}[^)]*,\s*(?:\w+\.)?(?:secret|hmac_secret|api_key|mek|dek|signing_key|private_key)\s*[,)]'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      Possible secret material interpolated into format string. Secrets, HMAC
+      keys, MEK/DEK values, and signing keys must never appear in formatted
+      strings (logs, errors, responses). Use [REDACTED] placeholders.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: information-leak
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # ============================================================================
+  # RULE 3: Hardcoded secret/token/key string literals
+  # ============================================================================
+  # Catches const/let bindings with secret-sounding names assigned string
+  # literals that look like real credentials (not test fixtures).
+  - id: provii.workers.hardcoded-secret-string
+    pattern-regex: '(?:let|const|static)\s+(?:mut\s+)?(?:\w*(?:SECRET|TOKEN|API_KEY|MEK|DEK|PASSWORD|HMAC_KEY))\s*(?::\s*&?str)?\s*=\s*"[^"]{8,}"'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+        - "**/tools/**"
+        - "**/examples/**"
+    message: >
+      Possible hardcoded credential in source. Secrets must be loaded from
+      Cloudflare Workers Secrets or KV, never hardcoded. If this is a constant
+      identifier (not a secret value), suppress with nosemgrep.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: hardcoded-credentials
+      cwe: "CWE-798: Use of Hard-coded Credentials"
+
+  # ============================================================================
+  # RULE 4: panic!/todo!/unimplemented! in Worker code
+  # ============================================================================
+  # Panics crash the entire Worker isolate. All errors must be returned as
+  # proper HTTP responses with appropriate status codes.
+  - id: provii.workers.panic-in-worker
+    patterns:
+      - pattern-either:
+          - pattern: panic!(...)
+          - pattern: todo!(...)
+          - pattern: unimplemented!(...)
+      - pattern-not-inside: |
+          #[test]
+          fn $TEST_FN(...) { ... }
+      - pattern-not-inside: |
+          #[cfg(test)]
+          mod $M { ... }
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+        - "**/tools/**"
+        - "**/examples/**"
+        - "**/benches/**"
+    message: >
+      Explicit panic/todo/unimplemented in Worker code will crash the isolate.
+      Return an appropriate ApiError or HTTP error response instead.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: correctness
+      subcategory: panic-safety
+      cwe: "CWE-248: Uncaught Exception"
+
+  # ============================================================================
+  # RULE 5: .expect() on external input parsing
+  # ============================================================================
+  # .expect() on operations that handle external data (JSON parsing, base64
+  # decoding, KV reads) will panic on malformed input. Use ? or match.
+  - id: provii.workers.expect-on-external-input
+    patterns:
+      - pattern-either:
+          - pattern: serde_json::from_str(...).expect(...)
+          - pattern: serde_json::from_slice(...).expect(...)
+          - pattern: serde_json::from_value(...).expect(...)
+          - pattern: URL_SAFE_NO_PAD.decode(...).expect(...)
+          - pattern: STANDARD.decode(...).expect(...)
+          - pattern: hex::decode(...).expect(...)
+          - pattern: base64::decode(...).expect(...)
+      - pattern-not-inside: |
+          #[test]
+          fn $TEST_FN(...) { ... }
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+        - "**/tools/**"
+    message: >
+      .expect() on external input parsing (JSON, base64, hex) will panic on
+      malformed data. Use ? operator or match for graceful error handling.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: correctness
+      subcategory: panic-safety
+      cwe: "CWE-248: Uncaught Exception"
+
+  # ============================================================================
+  # RULE 6: Response body may leak internal errors
+  # ============================================================================
+  # Worker responses must not expose internal error details (stack traces,
+  # storage paths, secret names) to clients. Check for format!("{:?}", e)
+  # patterns in response construction.
+  - id: provii.workers.internal-error-in-response
+    patterns:
+      - pattern-either:
+          - pattern: Response::error(format!($FMT, ..., $ERR, ...), ...)
+          - pattern: Response::error(format!($FMT, ..., $ERR), ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: '.*\{:?\?\}.*'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      HTTP error response may leak internal error details via debug formatting
+      ({:?}). Use a generic message for the client and log the detailed error
+      internally with console_log! instead.
+    languages: [rust]
+    severity: WARNING
+    metadata:
+      category: security
+      subcategory: information-leak
+      cwe: "CWE-209: Generation of Error Message Containing Sensitive Information"
+
+  # ============================================================================
+  # RULE 7: Missing #![forbid(unsafe_code)]
+  # ============================================================================
+  # All Worker crates should forbid unsafe code. There is no legitimate reason
+  # for unsafe in Cloudflare Workers Rust code.
+  - id: provii.workers.unsafe-block
+    patterns:
+      - pattern: unsafe { ... }
+      - pattern-not-inside: |
+          #[test]
+          fn $TEST_FN(...) { ... }
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+        - "**/tools/**"
+    message: >
+      Unsafe code in Worker crate. Cloudflare Workers Rust code has no
+      legitimate need for unsafe blocks. Remove or refactor.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: memory-safety
+      cwe: "CWE-119: Improper Restriction of Operations within Memory Buffer"
+
+  # ============================================================================
+  # RULE 8: KV get without error handling
+  # ============================================================================
+  # KV operations can fail (network, rate limits, missing keys). Using .unwrap()
+  # on KV results will panic the Worker.
+  - id: provii.workers.kv-unwrap
+    patterns:
+      - pattern-either:
+          - pattern: $KV.get($KEY).text().await.unwrap()
+          - pattern: $KV.get($KEY).json().await.unwrap()
+          - pattern: $KV.put($KEY, $VAL).unwrap()
+          - pattern: $KV.list().execute().await.unwrap()
+      - pattern-not-inside: |
+          #[test]
+          fn $TEST_FN(...) { ... }
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      KV operation with .unwrap() will panic the Worker on network errors or
+      missing keys. Use ? operator for graceful error handling.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: correctness
+      subcategory: panic-safety
+      cwe: "CWE-248: Uncaught Exception"
+
+  # ============================================================================
+  # RULE 9: Struct with secret field missing custom Debug
+  # ============================================================================
+  # Structs holding secrets must implement custom Debug that redacts the secret
+  # fields to prevent accidental logging.
+  - id: provii.workers.secret-struct-no-redacted-debug
+    pattern-regex: '#\[derive\([^)]*Debug[^)]*\)\]\s*pub\s+struct\s+\w+\s*\{[^}]*(?:hmac_secret|api_key_hash|encrypted_hmac|signing_key|private_key|master_key|dek_encrypted)\s*:'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      Struct with secret field uses derive(Debug), which will print secret
+      values in logs. Implement a custom Debug trait that redacts sensitive
+      fields with "[REDACTED]". See EncryptedSecret in envelope_encryption.rs.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: information-leak
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # ============================================================================
+  # RULE 10: console_log with secret-named variables
+  # ============================================================================
+  # console_log! in Workers goes to the dashboard/wrangler tail. Secret
+  # values must never be logged.
+  - id: provii.workers.console-log-secrets
+    pattern-regex: 'console_log!\s*\([^;]*(?:\{\}|(?:\{:\?\}))[^;]*,\s*[^;]*(?:\.secret|\.hmac_secret|\.api_key|\.mek|\.dek|\.sk|\.signing_key|\.private_key|\.password)[^;]*\)'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      console_log! appears to include secret field values. Worker logs are
+      visible in the Cloudflare dashboard. Redact secrets before logging.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: information-leak
+      cwe: "CWE-532: Insertion of Sensitive Information into Log File"
+
+  # ============================================================================
+  # RULE 11: CORS wildcard origin
+  # ============================================================================
+  # CORS Access-Control-Allow-Origin: * on authenticated endpoints allows
+  # credential theft from any origin.
+  - id: provii.workers.cors-wildcard
+    pattern-regex: '"Access-Control-Allow-Origin"\s*,\s*"\\*"'
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      CORS wildcard origin (*) allows any website to make authenticated requests.
+      Use specific allowed origins from the client configuration.
+    languages: [rust]
+    severity: ERROR
+    metadata:
+      category: security
+      subcategory: cors-misconfiguration
+      cwe: "CWE-942: Permissive Cross-domain Policy with Untrusted Domains"
+
+  # ============================================================================
+  # RULE 12: Missing Cache-Control on sensitive responses
+  # ============================================================================
+  # Responses containing tokens, challenges, or verification results must
+  # include Cache-Control: no-store to prevent caching of sensitive data.
+  - id: provii.workers.response-missing-no-store
+    patterns:
+      - pattern-either:
+          - pattern: |
+              Response::from_json(&$BODY)
+          - pattern: |
+              Response::ok($BODY)
+      - metavariable-regex:
+          metavariable: $BODY
+          regex: '.*(?:challenge|token|session|proof|credential|verify).*'
+      - pattern-not-inside: |
+          #[test]
+          fn $TEST_FN(...) { ... }
+    paths:
+      exclude:
+        - "**/target/**"
+        - "**/tests/**"
+        - "**/fuzz/**"
+    message: >
+      Response containing sensitive data (challenge, token, session, proof)
+      should include Cache-Control: no-store header. Verify this response has
+      appropriate cache headers applied.
+    languages: [rust]
+    severity: INFO
+    metadata:
+      category: security
+      subcategory: caching
+      cwe: "CWE-524: Use of Cache Containing Sensitive Information"

@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+# Pure-logic extraction from the provii-verifier root crate.
+#
+# This crate contains verification logic that has NO dependency on worker,
+# wasm-bindgen, js-sys, or any other wasm32-only crate. It can be built and
+# tested on native targets (x86_64, aarch64) and is included in the
+# cargo-llvm-cov coverage measurement.
+#
+# The root provii-verifier crate delegates to functions here and remains
+# the thin Worker entry point that handles Env/Request/Response plumbing.
+
+[package]
+name = "provii-verifier-logic"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Pure verification logic extracted from provii-verifier for native testability"
+
+[dependencies]
+# Cryptography
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2.6"
+base64 = "0.22"
+hex = "0.4"
+
+# Provii crypto (PKCE challenge generation)
+provii-crypto-protocol = { path = "../../../provii-crypto/crypto-protocol" }
+
+# URL handling (origin matching)
+url = "2.5"
+
+[dev-dependencies]
+proptest = "1.4"
+
+# Security-focused lints (match root crate)
+[lints.rust]
+unsafe_code = "forbid"
+dead_code = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+too_many_arguments = "allow"
+doc_lazy_continuation = "allow"

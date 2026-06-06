@@ -1,0 +1,249 @@
+name: Fuzz Testing
+
+on:
+  schedule:
+    # Run every Saturday at midnight UTC
+    - cron: '0 0 * * 6'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration per target (seconds)'
+        required: false
+        default: '600'
+      targets:
+        description: 'Specific targets (comma-separated, empty for all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Default 10 minutes per target for scheduled runs
+  FUZZ_DURATION: ${{ github.event.inputs.duration || '600' }}
+
+jobs:
+  fuzz:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 300  # 5 hours max for all targets
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: nightly
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "fuzz"
+
+      - name: Download corpus artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: fuzz-corpus
+          path: fuzz/corpus/
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "0.13.1" --locked
+
+      - name: Get fuzz targets
+        id: targets
+        env:
+          INPUT_TARGETS: ${{ github.event.inputs.targets }}
+        run: |
+          cd fuzz
+          if [[ -n "$INPUT_TARGETS" ]]; then
+            TARGETS="$INPUT_TARGETS"
+          else
+            # Get all fuzz targets from Cargo.toml
+            TARGETS=$(grep -E '^\[\[bin\]\]' -A 1 Cargo.toml | grep 'name = ' | sed 's/name = "\(.*\)"/\1/' | tr '\n' ',' | sed 's/,$//')
+          fi
+          echo "targets=${TARGETS}" >> $GITHUB_OUTPUT
+          echo "Fuzz targets: ${TARGETS}"
+
+      - name: Run fuzz tests
+        id: fuzz
+        env:
+          FUZZ_TARGETS: ${{ steps.targets.outputs.targets }}
+          FUZZ_DURATION_SEC: ${{ env.FUZZ_DURATION }}
+        run: |
+          cd fuzz
+          TARGETS="$FUZZ_TARGETS"
+          DURATION="$FUZZ_DURATION_SEC"
+          CRASHES_FOUND=0
+          CRASH_DETAILS=""
+
+          echo "Running fuzz tests with ${DURATION}s timeout per target"
+          echo "======================================================="
+
+          IFS=',' read -ra TARGET_ARRAY <<< "$TARGETS"
+          for target in "${TARGET_ARRAY[@]}"; do
+            target=$(echo "$target" | xargs)  # Trim whitespace
+            if [[ -z "$target" ]]; then
+              continue
+            fi
+
+            echo ""
+            echo "=== Fuzzing: $target ==="
+            echo "Duration: ${DURATION}s"
+
+            mkdir -p "corpus/${target}"
+
+            # Run fuzzer with timeout
+            set +e
+            timeout "${DURATION}s" cargo +nightly fuzz run "$target" -- \
+              -max_total_time="${DURATION}" \
+              -artifact_prefix="artifacts/${target}/" \
+              2>&1 | tee "fuzz_${target}.log"
+            EXIT_CODE=$?
+            set -e
+
+            # Check for crashes
+            if [[ -d "artifacts/${target}" ]] && [[ -n "$(ls -A artifacts/${target}/ 2>/dev/null)" ]]; then
+              echo "::error::Crash found in ${target}!"
+              CRASHES_FOUND=$((CRASHES_FOUND + 1))
+              CRASH_DETAILS="${CRASH_DETAILS}\n- ${target}: $(ls artifacts/${target}/)"
+            else
+              echo "No crashes found in ${target}"
+            fi
+          done
+
+          echo "crashes_found=${CRASHES_FOUND}" >> $GITHUB_OUTPUT
+          echo "crash_details=${CRASH_DETAILS}" >> $GITHUB_OUTPUT
+
+          if [[ $CRASHES_FOUND -gt 0 ]]; then
+            echo "::error::Found ${CRASHES_FOUND} crash(es)!"
+          fi
+
+      - name: Upload corpus
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus
+          path: fuzz/corpus/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload crash artifacts
+        if: steps.fuzz.outputs.crashes_found != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          retention-days: 90
+
+      - name: Upload fuzz logs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-logs
+          path: fuzz/fuzz_*.log
+          retention-days: 30
+
+      - name: Create issue on crash
+        if: steps.fuzz.outputs.crashes_found != '0'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          CRASH_COUNT: ${{ steps.fuzz.outputs.crashes_found }}
+          CRASH_DETAILS: ${{ steps.fuzz.outputs.crash_details }}
+        with:
+          script: |
+            const crashCount = process.env.CRASH_COUNT;
+            const crashDetails = process.env.CRASH_DETAILS;
+
+            const issueTitle = `[Security] Fuzz testing found ${crashCount} crash(es)`;
+            const issueBody = `## Fuzz Testing Crash Report
+
+            **Date:** ${new Date().toISOString()}
+            **Workflow Run:** [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+
+            ### Crashes Found
+            ${crashDetails.replace(/\\n/g, '\n')}
+
+            ### Next Steps
+            1. Download the crash artifacts from the workflow run
+            2. Reproduce locally with \`cargo +nightly fuzz run <target> <crash_file>\`
+            3. Fix the underlying issue
+            4. Add the crash input to the corpus as a regression test
+
+            ### Artifacts
+            - Crash files: Available in workflow artifacts
+            - Fuzz logs: Available in workflow artifacts
+
+            /cc @provii/security-team
+            `;
+
+            // Check if similar issue exists
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,fuzz'
+            });
+
+            if (existingIssues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: issueBody,
+                labels: ['security', 'fuzz', 'crash']
+              });
+            } else {
+              // Comment on existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssues.data[0].number,
+                body: `## New Crash Report\n\n${issueBody}`
+              });
+            }
+
+      - name: Fuzz summary
+        env:
+          FUZZ_TARGETS_SUMMARY: ${{ steps.targets.outputs.targets }}
+          FUZZ_DUR: ${{ env.FUZZ_DURATION }}
+          FUZZ_CRASHES: ${{ steps.fuzz.outputs.crashes_found }}
+          FUZZ_CRASH_DETAILS: ${{ steps.fuzz.outputs.crash_details }}
+        run: |
+          echo "## Fuzz Testing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Targets tested:** $FUZZ_TARGETS_SUMMARY" >> $GITHUB_STEP_SUMMARY
+          echo "- **Duration per target:** ${FUZZ_DUR}s" >> $GITHUB_STEP_SUMMARY
+          echo "- **Crashes found:** $FUZZ_CRASHES" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "$FUZZ_CRASHES" != "0" ]]; then
+            echo "### Crash Details" >> $GITHUB_STEP_SUMMARY
+            echo "$FUZZ_CRASH_DETAILS" | sed 's/\\n/\n/g' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Fail if crashes found
+        if: steps.fuzz.outputs.crashes_found != '0'
+        env:
+          FUZZ_CRASHES: ${{ steps.fuzz.outputs.crashes_found }}
+        run: |
+          echo "Fuzz testing found $FUZZ_CRASHES crash(es)"
+          exit 1

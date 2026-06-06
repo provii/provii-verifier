@@ -1,0 +1,96 @@
+# Verifier API - Code Ownership
+#
+# This file defines who is responsible for reviewing changes to different parts
+# of the codebase. GitHub will automatically request reviews from code owners
+# when pull requests modify their owned files.
+#
+# More information: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# =============================================================================
+# DEFAULT OWNERSHIP
+# =============================================================================
+# All API code requires security-aware review
+* @tim-maelstrom
+
+# =============================================================================
+# CRITICAL SECURITY PATHS
+# =============================================================================
+
+# Authentication and security modules
+/src/security/ @tim-maelstrom
+
+# API routes and endpoints
+/src/routes/ @tim-maelstrom
+
+# Type definitions (affects API contracts)
+/src/types/ @tim-maelstrom
+
+# Durable Objects (state management and consistency)
+/src/durable_objects/ @tim-maelstrom
+
+# Storage layer (data security)
+/src/storage/ @tim-maelstrom
+
+# Utilities (may contain crypto or security helpers)
+/src/utils/ @tim-maelstrom
+
+# Fuzzing (security testing)
+/fuzz/ @tim-maelstrom
+
+# =============================================================================
+# API DEFINITIONS
+# =============================================================================
+
+# OpenAPI specification (API contract)
+/openapi.json @tim-maelstrom
+
+# =============================================================================
+# INFRASTRUCTURE & DEPLOYMENT
+# =============================================================================
+
+# Cloudflare Workers configuration
+/wrangler.toml @tim-maelstrom
+
+# Deployment and migration scripts
+*.sh @tim-maelstrom
+/migrate_*.sh @tim-maelstrom
+
+# CI/CD workflows
+/.github/workflows/ @tim-maelstrom
+
+# =============================================================================
+# BUILD & DEPENDENCIES
+# =============================================================================
+
+# Rust dependencies
+Cargo.toml @tim-maelstrom
+Cargo.lock @tim-maelstrom
+
+# Build configuration
+/build/ @tim-maelstrom
+
+# =============================================================================
+# CONFIGURATION & ASSETS
+# =============================================================================
+
+# Configuration files
+/config/ @tim-maelstrom
+
+# Static assets
+/assets/ @tim-maelstrom
+
+# =============================================================================
+# DOCUMENTATION
+# =============================================================================
+
+# All documentation
+/docs/ @tim-maelstrom
+*.md @tim-maelstrom
+/README.md @tim-maelstrom
+/COMPLIANCE_STATUS.md @tim-maelstrom
+
+# =============================================================================
+# VERSION CONTROL
+# =============================================================================
+
+/.gitignore @tim-maelstrom

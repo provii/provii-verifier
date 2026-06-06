@@ -1,0 +1,206 @@
+name: Mutation Testing
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'  # Weekly on Monday at 5am UTC
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'crates/*/src/**'
+      - 'bins/*/src/**'
+      - 'mutants.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  mutants:
+    name: Mutation Testing
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-mutants"
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version =27.0.0
+
+      # The root `provii-verifier` crate targets wasm32 only (worker,
+      # wasm-bindgen, js_sys deps). cargo-mutants runs on native, so we
+      # restrict mutation testing to the native-buildable workspace subcrates
+      # under crates/ and bins/. The native target override is passed via
+      # -C (cargo-arg) to override the wasm32 default in .cargo/config.toml.
+      - name: Determine mutant scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          NATIVE_PACKAGES="provii-verifier-logic provii-verifier-cors-tests provii-verifier-rate-limit-tests provii-verifier-ban-entry-decode"
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            CHANGED=$(git diff --name-only origin/main...HEAD -- \
+              'crates/*/src/**/*.rs' \
+              'bins/*/src/**/*.rs' \
+              'src/**/*.rs' \
+              | tr '\n' ',' | sed 's/,$//')
+            if [[ -z "$CHANGED" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "No mutatable source files changed"
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "files=$CHANGED" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "files=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "packages=$NATIVE_PACKAGES" >> "$GITHUB_OUTPUT"
+
+      - name: Run cargo-mutants (full)
+        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.files == ''
+        env:
+          MUTANT_PACKAGES: ${{ steps.scope.outputs.packages }}
+        # Exit codes: 0 = all caught, 2 = some survived. The score gate
+        # below is authoritative for survivors, so exit 2 is not a job
+        # failure here. Any other code (1 = usage, 4 = baseline failed)
+        # is a genuine failure.
+        run: |
+          PKG_ARGS=""
+          for pkg in $MUTANT_PACKAGES; do
+            PKG_ARGS="$PKG_ARGS --package $pkg"
+          done
+          # --target and --locked are cargo flags, passed via -C (cargo-arg).
+          # cargo-mutants does not accept --target directly.
+          # --in-place mutates the checked-out tree rather than copying it to a
+          # temp dir. provii-verifier-logic has a relative path dependency on
+          # ../../../provii-crypto/crypto-protocol; the default copy to /tmp
+          # breaks that relative path and the unmutated baseline fails to build.
+          # --in-place keeps the real working tree so the path resolves.
+          # No -C --locked: provii-crypto is cloned at the v0.1.0 tag, whose
+          # transitive graph differs from the committed Cargo.lock, so cargo
+          # must resolve the lock at build time. The host CI build (coverage,
+          # Miri) likewise runs without --locked for the same reason.
+          set +e
+          cargo mutants $PKG_ARGS \
+            --in-place \
+            -C --target=x86_64-unknown-linux-gnu \
+            --timeout 300
+          ec=$?
+          set -e
+          if [ "$ec" -ne 0 ] && [ "$ec" -ne 2 ]; then
+            echo "::error::cargo-mutants exited $ec (build or baseline failure, not surviving mutants)"
+            exit "$ec"
+          fi
+
+      - name: Run cargo-mutants (incremental)
+        if: steps.scope.outputs.skip != 'true' && steps.scope.outputs.files != ''
+        env:
+          MUTANT_PACKAGES: ${{ steps.scope.outputs.packages }}
+          MUTANT_FILES: ${{ steps.scope.outputs.files }}
+        # Exit codes: same as above. exit 2 = survivors, tolerated here.
+        run: |
+          IFS=',' read -ra FILES <<< "$MUTANT_FILES"
+          FILE_ARGS=""
+          for f in "${FILES[@]}"; do
+            # Only include files from native-buildable crates/ and bins/ subcrates
+            if [[ "$f" == bins/* ]] || [[ "$f" == crates/* ]]; then
+              FILE_ARGS="$FILE_ARGS --file $f"
+            fi
+          done
+          if [[ -z "$FILE_ARGS" ]]; then
+            echo "No native-target files changed (root src/ is wasm32-only), skipping"
+            exit 0
+          fi
+          PKG_ARGS=""
+          for pkg in $MUTANT_PACKAGES; do
+            PKG_ARGS="$PKG_ARGS --package $pkg"
+          done
+          # --in-place: see the full-run step above (relative path dep on
+          # provii-crypto breaks under the default copy-to-temp).
+          set +e
+          cargo mutants $PKG_ARGS \
+            --in-place \
+            -C --target=x86_64-unknown-linux-gnu \
+            --timeout 120 \
+            $FILE_ARGS
+          ec=$?
+          set -e
+          if [ "$ec" -ne 0 ] && [ "$ec" -ne 2 ]; then
+            echo "::error::cargo-mutants exited $ec (build or baseline failure, not surviving mutants)"
+            exit "$ec"
+          fi
+
+      - name: Check mutation score threshold
+        if: steps.scope.outputs.skip != 'true'
+        run: |
+          OUTCOMES="mutants.out/outcomes.json"
+          if [[ ! -f "$OUTCOMES" ]]; then
+            echo "No outcomes file found -- cargo-mutants may have found no mutants"
+            exit 0
+          fi
+
+          TOTAL=$(jq '[.outcomes[] | select(.scenario != "Baseline")] | length' "$OUTCOMES")
+          CAUGHT=$(jq '[.outcomes[] | select(.scenario != "Baseline") | select(.summary == "CaughtMutant")] | length' "$OUTCOMES")
+
+          if [[ "$TOTAL" -eq 0 ]]; then
+            echo "No mutants generated"
+            exit 0
+          fi
+
+          SCORE=$(echo "scale=1; $CAUGHT * 100 / $TOTAL" | bc)
+          echo "Mutation score: ${SCORE}% ($CAUGHT/$TOTAL mutants caught)"
+
+          # Break threshold: 70%
+          THRESHOLD=70
+          PASS=$(echo "$SCORE >= $THRESHOLD" | bc)
+          if [[ "$PASS" -ne 1 ]]; then
+            echo "::error::Mutation score ${SCORE}% is below threshold of ${THRESHOLD}%"
+            exit 1
+          fi
+
+      - name: Upload mutation report
+        if: always() && steps.scope.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-report
+          path: mutants.out/
+          retention-days: 14

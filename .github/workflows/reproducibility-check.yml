@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+# Proves the Worker wasm builds bit-for-bit reproducibly. Builds index_bg.wasm
+# twice from a clean state via scripts/reproducible-build.sh and fails if the two
+# sha256 differ. This is the EMPIRICAL guarantee behind the "rebuild it yourself"
+# claim (see VERIFY.md); without it, reproducibility is only theoretical.
+#
+# Run it on at least two different runner images periodically (matrix below) to
+# catch host-dependence, not just same-host determinism.
+#
+# SHA-pinned actions per the org CI/CD standard.
+name: Reproducibility check (wasm bit-for-bit)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebuild-and-diff:
+    name: Rebuild twice and diff
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two distinct images: same-image determinism AND cross-image stability.
+        os: [ubuntu-latest, ubuntu-24.04]
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Clone sibling path-deps
+        run: |
+          git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+          git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install wabt + binaryen (wasm-objdump for diffing; wasm-opt for the build)
+        run: |
+          sudo apt-get update
+          # binaryen provides wasm-opt, which scripts/reproducible-build.sh calls
+          # for the strip step. Without it the script dies "wasm-opt: command not
+          # found". NOTE: the apt binaryen version differs across runner images, so
+          # for true cross-image determinism pin a specific binaryen release here
+          # and set EXPECTED_WASM_OPT_VERSION in the script.
+          sudo apt-get install -y --no-install-recommends wabt binaryen
+
+      - name: Build A
+        run: |
+          bash ./scripts/reproducible-build.sh
+          cp build/index_bg.wasm /tmp/a.wasm
+
+      - name: Clean
+        run: |
+          cargo clean || true
+          rm -rf build target/wasm32-unknown-unknown
+
+      - name: Build B (clean rebuild)
+        run: |
+          bash ./scripts/reproducible-build.sh
+          cp build/index_bg.wasm /tmp/b.wasm
+
+      - name: Assert bit-for-bit identical
+        run: |
+          set -euo pipefail
+          A=$(sha256sum /tmp/a.wasm | awk '{print $1}')
+          B=$(sha256sum /tmp/b.wasm | awk '{print $1}')
+          echo "A=$A"
+          echo "B=$B"
+          if [ "$A" != "$B" ]; then
+            echo "::error::wasm build is NOT reproducible on ${{ matrix.os }}"
+            echo "Section header diff (a vs b):"
+            wasm-objdump -h /tmp/a.wasm > /tmp/a.h || true
+            wasm-objdump -h /tmp/b.wasm > /tmp/b.h || true
+            diff /tmp/a.h /tmp/b.h || true
+            exit 1
+          fi
+          echo "OK: wasm is bit-for-bit reproducible on ${{ matrix.os }} ($A)"

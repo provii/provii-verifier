@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "description": "Golden vectors for the cross-service canonical HMAC signing message. Locks the byte-exact wire format used by provii-verifier, provii-issuer, and provii-agegate. The format is: '{timestamp}:{method}:{path}:{body}:{nonce}'. The body is whatever the service's canonical-message constructor produced. The shared HMAC key below lets every implementation prove byte-equivalence with `HMAC-SHA-256(key, canonical_message)`.",
+  "hmac_key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "vectors": [
+    {
+      "test_name": "verifier_post_challenge_simple",
+      "service_origin": "provii-verifier",
+      "constructor": "create_canonical_message_for_challenge",
+      "inputs": {
+        "timestamp": 1700000000,
+        "method": "POST",
+        "path": "/v1/challenge",
+        "body": "{\"code_challenge\":\"KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio\",\"method\":\"S256\",\"verifying_key_id\":1,\"expires_in\":300}",
+        "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "expected_canonical_bytes_hex": "313730303030303030303a504f53543a2f76312f6368616c6c656e67653a7b22636f64655f6368616c6c656e6765223a224b696f714b696f714b696f714b696f714b696f714b696f714b696f714b696f714b696f714b696f714b696f222c226d6574686f64223a2253323536222c22766572696679696e675f6b65795f6964223a312c22657870697265735f696e223a3330307d3a30313233343536373839616263646566303132333435363738396162636465663031323334353637383961626364656630313233343536373839616263646566",
+      "expected_hmac_hex_with_known_key": "d6e952e76c1d75b3cde2d5ecf8fde0051b5108282a1e411ea7d6c2848c64c1ab"
+    },
+    {
+      "test_name": "verifier_post_challenge_null_vk",
+      "service_origin": "provii-verifier",
+      "constructor": "create_canonical_message_for_challenge",
+      "inputs": {
+        "timestamp": 1700000060,
+        "method": "POST",
+        "path": "/v1/challenge",
+        "body": "{\"code_challenge\":\"q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s\",\"method\":\"S256\",\"verifying_key_id\":null,\"expires_in\":120}",
+        "nonce": "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+      },
+      "expected_canonical_bytes_hex": "313730303030303036303a504f53543a2f76312f6368616c6c656e67653a7b22636f64655f6368616c6c656e6765223a2271367572713675727136757271367572713675727136757271367572713675727136757271367572713673222c226d6574686f64223a2253323536222c22766572696679696e675f6b65795f6964223a6e756c6c2c22657870697265735f696e223a3132307d3a66656564666163656665656466616365666565646661636566656564666163656665656466616365666565646661636566656564666163656665656466616365",
+      "expected_hmac_hex_with_known_key": "c5793e4aca5b56c52d0dc86c19b53604882afea6d9b4d0a47b55ee2a766765dc"
+    },
+    {
+      "test_name": "generic_get_empty_body",
+      "service_origin": "shared",
+      "constructor": "raw_assemble",
+      "inputs": {
+        "timestamp": 1700001000,
+        "method": "GET",
+        "path": "/v1/challenge/abc-uuid-1234",
+        "body": "",
+        "nonce": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "expected_canonical_bytes_hex": "313730303030313030303a4745543a2f76312f6368616c6c656e67652f6162632d757569642d313233343a3a31313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131",
+      "expected_hmac_hex_with_known_key": "08e7634d625c0e9f5dd781cabfa48d020945abc89f86d3ab58df1a0906f0c6f7"
+    },
+    {
+      "test_name": "post_nested_object_btreemap_ordering",
+      "service_origin": "shared",
+      "constructor": "raw_assemble",
+      "inputs": {
+        "timestamp": 1700002000,
+        "method": "POST",
+        "path": "/v1/issuer/start",
+        "body": "{\"a\":1,\"b\":\"two\",\"nested\":{\"x\":true,\"y\":[1,2,3]}}",
+        "nonce": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+      },
+      "expected_canonical_bytes_hex": "313730303030323030303a504f53543a2f76312f6973737565722f73746172743a7b2261223a312c2262223a2274776f222c226e6573746564223a7b2278223a747275652c2279223a5b312c322c335d7d7d3a61626364656630313233343536373839616263646566303132333435363738396162636465663031323334353637383961626364656630313233343536373839",
+      "expected_hmac_hex_with_known_key": "2a1e439a886d01a66bc9628b7e6a7659279dacb0e466786c1771ee9c97edbf93"
+    },
+    {
+      "test_name": "issuer_post_start_client_actor",
+      "service_origin": "provii-issuer",
+      "constructor": "create_canonical_message_for_start",
+      "inputs": {
+        "timestamp": 1700005000,
+        "method": "POST",
+        "path": "/v1/start",
+        "body": "{\"actor\":\"client\",\"authorizer\":{\"format\":\"client\",\"key_id\":\"client-001\",\"timestamp\":1700005000},\"schema\":null,\"validity_days\":null,\"kid\":null}",
+        "nonce": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+      },
+      "expected_canonical_bytes_hex": "313730303030353030303a504f53543a2f76312f73746172743a7b226163746f72223a22636c69656e74222c22617574686f72697a6572223a7b22666f726d6174223a22636c69656e74222c226b65795f6964223a22636c69656e742d303031222c2274696d657374616d70223a313730303030353030307d2c22736368656d61223a6e756c6c2c2276616c69646974795f64617973223a6e756c6c2c226b6964223a6e756c6c7d3a31323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263646566",
+      "expected_hmac_hex_with_known_key": "af3bb81eabfccbf9332e2e20843885a8a53de4f8a6d0c5324807872a38e449da"
+    },
+    {
+      "test_name": "issuer_post_attestation_create",
+      "service_origin": "provii-issuer",
+      "constructor": "create_canonical_message_for_attestation",
+      "inputs": {
+        "timestamp": 1700006000,
+        "method": "POST",
+        "path": "/v1/attestation/create",
+        "body": "{\"dob_days\":7300,\"authorizer\":{\"format\":\"client\",\"key_id\":\"client-001\",\"timestamp\":1700006000}}",
+        "nonce": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      },
+      "expected_canonical_bytes_hex": "313730303030363030303a504f53543a2f76312f6174746573746174696f6e2f6372656174653a7b22646f625f64617973223a373330302c22617574686f72697a6572223a7b22666f726d6174223a22636c69656e74222c226b65795f6964223a22636c69656e742d303031222c2274696d657374616d70223a313730303030363030307d7d3a64656164626565666465616462656566646561646265656664656164626565666465616462656566646561646265656664656164626565666465616462656566",
+      "expected_hmac_hex_with_known_key": "f96acc9a1817b2c69379a171abe44b9d09f3260644a7cd987a1ce0356327ff40"
+    },
+    {
+      "test_name": "very_long_body_1kb",
+      "service_origin": "shared",
+      "constructor": "raw_assemble",
+      "inputs": {
+        "timestamp": 1700003000,
+        "method": "POST",
+        "path": "/v1/data",
+        "body_construct": {
+          "kind": "filler_object",
+          "filler_field": "data",
+          "filler_byte": "x",
+          "filler_count": 1024
+        },
+        "nonce": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_canonical_length": 1125,
+      "expected_hmac_hex_with_known_key": "64054b6b503a39f1d8fc2e974708b6e279bafd2a87bc2bdc0f0d6a820f59ec56"
+    }
+  ],
+  "reject_vectors": [
+    {
+      "test_name": "empty_nonce_rejected",
+      "reason": "Authorizer.nonce is mandatory; an empty nonce string MUST cause request validation to fail before the HMAC is even computed. provii-verifier rejects with 400 in `Authorizer::validate` (provii-verifier/src/types/auth.rs).",
+      "inputs": {
+        "timestamp": 1700004000,
+        "method": "POST",
+        "path": "/v1/challenge",
+        "body": "{\"code_challenge\":\"KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio\",\"method\":\"S256\",\"verifying_key_id\":1,\"expires_in\":300}",
+        "nonce": ""
+      },
+      "expected_outcome": "validation_error_before_canonicalisation"
+    },
+    {
+      "test_name": "negative_timestamp_rejected",
+      "reason": "Timestamp is u64 seconds since epoch; negative or non-numeric values cannot deserialise. The HTTP layer rejects with 400 before canonical message construction is attempted.",
+      "inputs": {
+        "timestamp_raw_string": "-1",
+        "method": "POST",
+        "path": "/v1/challenge",
+        "body": "{\"code_challenge\":\"KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio\",\"method\":\"S256\",\"verifying_key_id\":1,\"expires_in\":300}",
+        "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "expected_outcome": "deserialise_error_before_canonicalisation"
+    },
+    {
+      "test_name": "future_timestamp_skew_rejected",
+      "reason": "Timestamp must be within +/- 300 seconds of server time per ADV-IA-016. A timestamp 10 hours in the future is rejected by the auth layer before HMAC verification.",
+      "inputs": {
+        "timestamp": 9999999999,
+        "method": "POST",
+        "path": "/v1/challenge",
+        "body": "{\"code_challenge\":\"KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio\",\"method\":\"S256\",\"verifying_key_id\":1,\"expires_in\":300}",
+        "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "expected_outcome": "timestamp_skew_rejection"
+    }
+  ],
+  "attestation_vectors": [
+    {
+      "test_name": "attestation_legacy_no_binding",
+      "constructor": "DobAttestation::compute_message_bytes",
+      "inputs": {
+        "dob_days": 7300,
+        "issuer_id": "dmv.ca.gov",
+        "timestamp": 1704067200,
+        "nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+        "session_id": null,
+        "client_id": null
+      },
+      "expected_message_bytes_hex": "1b08cb4c04148b01f08fe3ca93bd93dcd79f1f23a96b70b8fcfae494716c017d"
+    },
+    {
+      "test_name": "attestation_bound_session_and_client",
+      "constructor": "DobAttestation::compute_message_bytes",
+      "inputs": {
+        "dob_days": 7300,
+        "issuer_id": "docs-sbx.provii.app",
+        "timestamp": 1704067200,
+        "nonce_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+        "session_id": "7f3a9c2e1b8d4a6f0c5e9b2d7a3f8c1e",
+        "client_id": "docs-sbx-abcd1234"
+      },
+      "expected_message_bytes_hex": "7de4fb09f16b1c9eec8c02161b9bf168262a3449e4f9bf1a432ea346bce2df2b"
+    },
+    {
+      "test_name": "attestation_session_only_empty_client",
+      "constructor": "DobAttestation::compute_message_bytes",
+      "inputs": {
+        "dob_days": 8000,
+        "issuer_id": "issuer.example.com",
+        "timestamp": 1700000000,
+        "nonce_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "session_id": "abcd",
+        "client_id": null
+      },
+      "expected_message_bytes_hex": "8e01447097fa21b1ef213ef073334d99a76b80d0d7869c3514f986a3831160a9"
+    },
+    {
+      "test_name": "attestation_negative_dob_days_edge",
+      "constructor": "DobAttestation::compute_message_bytes",
+      "inputs": {
+        "dob_days": -1000,
+        "issuer_id": "x",
+        "timestamp": 0,
+        "nonce_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+        "session_id": "s",
+        "client_id": "c"
+      },
+      "expected_message_bytes_hex": "bccec409786145fbbd779f71909f5bfc757d4b82dc6d62ef52386bc4ad751388"
+    }
+  ]
+}

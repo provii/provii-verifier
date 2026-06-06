@@ -1,0 +1,480 @@
+#######################################################################
+# Production (Default) – Live traffic                                 #
+#######################################################################
+name = "production-verify"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-02-17"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# ───────────────────────── Account & routing ─────────────────────────
+account_id = "cdc726d78268c6e92f5f21eaaa75c7de"
+
+routes = [
+  { pattern = "verify.provii.app", custom_domain = true },
+  { pattern = "hosted.provii.app", custom_domain = true },
+]
+
+# ───────────────────────── Durable Objects ───────────────────────────
+[[durable_objects.bindings]]
+name = "VERIFIER_DO_CHALLENGE"
+class_name = "ChallengeDO"
+
+[[durable_objects.bindings]]
+name = "VERIFIER_DO_NONCE"
+class_name = "NonceDO"
+
+[[durable_objects.bindings]]
+name = "VERIFIER_DO_IDEMPOTENCY"
+class_name = "IdempotencyDO"
+
+# DEPRECATED: ChallengeLock binding REMOVED in step 2 of the v9 migration
+# sequence. The stub class is still exported from
+# `src/durable_objects/challenge_lock_stub.rs` so that Cloudflare doesn't
+# trip error 10064 (class depended on by existing DOs). Step 3 re-adds
+# the v9 deleted_classes migration and removes the stub.
+
+# ───────────────────────── Hosted-Mode Durable Objects ───────────────
+[[durable_objects.bindings]]
+name = "HOSTED_NONCE_DO"
+class_name = "HostedNonceDO"
+
+[[durable_objects.bindings]]
+name = "HOSTED_IDEMPOTENCY_DO"
+class_name = "HostedIdempotencyDO"
+
+[[durable_objects.bindings]]
+name = "HOSTED_CHALLENGE_NOTIFY_DO"
+class_name = "ChallengeNotifyDO"
+
+# ───────────────────────── Service Bindings ──────────────────────────
+# Direct worker-to-worker calls (no public internet, ~1-5ms latency)
+[[services]]
+binding = "CREDIT_MGMT"
+service = "provii-credit-management"
+
+# ───────────────────────── Queue Producers ──────────────────────────
+[[queues.producers]]
+queue = "provii-audit-events"
+binding = "AUDIT_QUEUE"
+
+# ───────────────────────── Migrations ────────────────────────────────
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = [
+  "ChallengeDO",
+  "NonceDO",
+  "IdempotencyDO",
+  "ChallengeLock",
+  "HostedNonceDO",
+  "HostedIdempotencyDO",
+  "ChallengeNotifyDO",
+]
+
+# Production KV namespaces.
+# NOTE: prod DO migration reset to a single clean v1 on 2026-06-05. The prior
+# v3-v9 lineage was deleted along with the prod Worker script (it was wedged on
+# the v9 ChallengeLock orphaned-DO problem that needed a Cloudflare support
+# ticket). Fresh slate mirrors the sandbox setup; all classes SQLite-backed.
+[[kv_namespaces]]
+binding = "VERIFIER_KV_CONFIG"
+id = "75998bab27264bfbb194190b56729750" # PRODUCTION_VERIFIER_CONFIG
+
+[[kv_namespaces]]
+binding = "VERIFIER_KV_BANLIST"
+id = "46ae40741a514046a37136d7eaf76fae" # PRODUCTION_VERIFIER_BANLIST
+
+[[kv_namespaces]]
+binding = "VERIFIER_KV_RATE_LIMITS"
+id = "bdcb719fd5924df6a9c92a29334baa75" # Shared RATE_LIMIT_CONFIG (centralised tier-based system)
+
+[[kv_namespaces]]
+binding = "VERIFIER_KV_ISSUER_REGISTRY"
+id = "ad40de8f553b42d2ac1de64d01510b44" # Shared with admin-portal ISSUER_REGISTRY
+
+# ── Hosted-mode KV namespaces (ported from provii-verifier) ──
+[[kv_namespaces]]
+binding = "HOSTED_PUBLIC_KEYS"
+id = "f8c87416747b4768bed0f11b4df9ff71"
+
+[[kv_namespaces]]
+binding = "ORIGIN_INDEX"
+id = "34ebbcbcabeb49e3b0ddd0b0550be107"
+
+[[kv_namespaces]]
+binding = "HOSTED_SESSIONS"
+id = "d430ef44ab0248a5a51dbd8c221a38a8"
+
+# ───────────────────────── Environment Variables ─────────────────────
+[vars]
+ENVIRONMENT = "production"
+API_VERSION = "1.0.0"
+API_BASE_URL = "https://verify.provii.app/v1"
+ALLOWED_ORIGINS = "https://invokeprovii.com,https://*.provii.app"
+PROVII_CORS_ORIGINS = "https://invokeprovii.com,https://*.provii.app"
+
+# Credit Management API Configuration
+CREDIT_MGMT_URL = "https://credit-management.provii.app"
+CREDIT_MGMT_KEY_ID = "provii-verifier"
+
+# Rate limiting
+DEFAULT_QUOTA_PER_HOUR = "500"   # Per-customer hourly quota
+SHORT_CODE_LIMIT_PER_HOUR = "60" # Per-IP short code enumeration limit
+PER_IP_LIMIT_PER_HOUR = "1000"   # R14: expert per-IP limit (was code-default-only; surfaced here at the same value, no behaviour change)
+
+# Security timeouts
+MAX_CHAL_AGE_MS = "300000" # 5 minutes
+NONCE_TTL_SEC = "300"      # 5 minutes
+
+# Optimised sharding configuration for current traffic scale (1K-10K verifications/min)
+# At 10K requests/min (167 req/s):
+# - 25 challenge shards = ~6.7 req/s/shard (keeps shards warm, low cold starts)
+# - 25 nonce shards = ~6.7 req/s/shard (keeps shards warm)
+# - 10 idempotency shards = ~16.7 req/s/shard (always hot)
+# Headroom: Can scale to 1M/min before needing to increase shard counts
+CHALLENGE_SHARD_COUNT = "25"   # Optimised for thousands/min (reduces cold starts)
+NONCE_SHARD_COUNT = "25"       # Optimised for thousands/min (reduces cold starts)
+IDEMPOTENCY_SHARD_COUNT = "10" # Optimised for thousands/min (always warm)
+
+# ── Hosted-mode configuration (ported from provii-verifier) ──
+HOSTED_BASE_URL = "https://hosted.provii.app"
+SESSION_TTL_SEC = "300"
+SESSION_COOKIE_NAME = "__Host-session"
+PKCE_CODE_VERIFIER_LENGTH = "128"
+HOSTED_DO_SHARD_COUNT = "25"
+
+# ───────────────────────── Build ─────────────────────────────────────
+[build]
+# Delegates to a script that no-ops during the production deploy (when CI sets
+# PROVII_SKIP_WORKER_BUILD=1) so wrangler uploads the exact signed artifact in
+# build/ instead of rebuilding and discarding it. See scripts/wrangler-build.sh.
+command = "bash ./scripts/wrangler-build.sh"
+
+# ───────────────────────── Cron Triggers ─────────────────────────────
+# DO keep-alive: Warm critical Durable Object shards every minute to eliminate cold starts on sandbox.
+[triggers]
+crons = ["* * * * *"] # DO keep-alive (every minute)
+
+# ───────────────────────── Observability ─────────────────────────────
+[observability.traces]
+enabled = true
+destinations = ["grafana-traces"]
+
+[observability.logs]
+enabled = true
+destinations = ["grafana-logs"]
+
+# ───────────────────────── Placement ─────────────────────────────────
+[placement]
+mode = "smart"
+
+# ───────────────────────── Analytics Engine ──────────────────────────
+[[analytics_engine_datasets]]
+binding = "VERIFIER_ANALYTICS"
+dataset = "VERIFIER_ANALYTICS"
+
+# ───────────────────────── Secrets Store ─────────────────────────────
+[[secrets_store_secrets]]
+binding = "VERIFIER_MEK"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_MEK_PROD"
+
+[[secrets_store_secrets]]
+binding = "CREDIT_MGMT_HMAC_KEY"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_CREDIT_MGMT_API_KEY_FROM_VERIFIER_PROD"
+
+# IP hash salt for GDPR-compliant salted IP hashing in audit logs
+[[secrets_store_secrets]]
+binding = "VERIFIER_IP_HASH_SALT"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_IP_HASH_SALT_PROD"
+
+# SB-002: STATUS_API_TOKEN migrated from env var to Secrets Store.
+# F-09 fix: the Argon2id hash is no longer pinned at cold start. The
+# verify path resolves both slots through a five-minute TTL cache in
+# `src/security/status_token_cache.rs` so a rotated token in Secrets
+# Store becomes effective on warm isolates without a redeploy.
+[[secrets_store_secrets]]
+binding = "STATUS_API_TOKEN"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_STATUS_TOKEN_PROD"
+
+# Dual-slot accept for STATUS_API_TOKEN.
+# When rotating, populate STATUS_API_TOKEN_PREVIOUS with the prior
+# token; the verify path tries current first, then previous. Drop the previous
+# slot once all callers have switched per the HMAC class runbook.
+[[secrets_store_secrets]]
+binding = "STATUS_API_TOKEN_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_STATUS_TOKEN_PROD_PREVIOUS"
+
+# ── Hosted-mode secrets (ported from provii-verifier) ──
+[[secrets_store_secrets]]
+binding = "HOSTED_MEK"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_HOSTED_MEK_PROD"
+
+[[secrets_store_secrets]]
+binding = "HOSTED_MEK_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_HOSTED_MEK_PROD_PREVIOUS"
+
+[[secrets_store_secrets]]
+binding = "SESSION_TOKEN_SECRET"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_SESSION_HMAC_PROD"
+
+[[secrets_store_secrets]]
+binding = "SESSION_TOKEN_SECRET_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_SESSION_HMAC_PROD_PREVIOUS"
+
+# ── Key Rotation: Previous secrets (optional, set during rotation) ──
+[[secrets_store_secrets]]
+binding = "VERIFIER_MEK_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_MEK_PROD_PREVIOUS"
+
+#######################################################################
+# Sandbox Environment (--env sandbox)                                 #
+#######################################################################
+[env.sandbox]
+name = "sandbox-verify"
+compatibility_date = "2026-02-17"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+routes = [
+  { pattern = "sandbox-verify.provii.app", custom_domain = true },
+  { pattern = "sandbox-hosted.provii.app", custom_domain = true },
+]
+
+# ── Durable Objects ──────────────────────────────────────────────────
+[[env.sandbox.durable_objects.bindings]]
+name = "VERIFIER_DO_CHALLENGE"
+class_name = "ChallengeDO"
+
+[[env.sandbox.durable_objects.bindings]]
+name = "VERIFIER_DO_NONCE"
+class_name = "NonceDO"
+
+[[env.sandbox.durable_objects.bindings]]
+name = "VERIFIER_DO_IDEMPOTENCY"
+class_name = "IdempotencyDO"
+
+# ── Hosted-mode Durable Objects ──────────────────────────────────────
+[[env.sandbox.durable_objects.bindings]]
+name = "HOSTED_NONCE_DO"
+class_name = "HostedNonceDO"
+
+[[env.sandbox.durable_objects.bindings]]
+name = "HOSTED_IDEMPOTENCY_DO"
+class_name = "HostedIdempotencyDO"
+
+[[env.sandbox.durable_objects.bindings]]
+name = "HOSTED_CHALLENGE_NOTIFY_DO"
+class_name = "ChallengeNotifyDO"
+
+# ── Service Bindings ─────────────────────────────────────────────────
+[[env.sandbox.services]]
+binding = "CREDIT_MGMT"
+service = "provii-credit-management"
+
+# ── Queue Producers ──────────────────────────────────────────────────
+[[env.sandbox.queues.producers]]
+queue = "provii-audit-events-sandbox"
+binding = "AUDIT_QUEUE"
+
+# ── Migrations ───────────────────────────────────────────────────────
+# Sandbox is a fresh worker as of the Provii rebrand, so its DO classes are
+# created from scratch in ONE migration rather than replaying prod's historical
+# v1-v9 lineage (which assumed pre-existing v1/v2 ChallengeDO/NonceDO classes
+# and carried a half-finished ChallengeLock teardown). All classes are
+# SQLite-backed: Cloudflare's required default for new namespaces, and a
+# superset of the key-value storage API the code uses (ChallengeDO/NonceDO call
+# storage().get/put/delete only, no .sql()), so the shared source runs
+# unchanged. ChallengeLock is the unbound stub the source still exports; it
+# returns 410 Gone and is never allocated.
+[[env.sandbox.migrations]]
+tag = "v1"
+new_sqlite_classes = [
+  "ChallengeDO",
+  "NonceDO",
+  "IdempotencyDO",
+  "ChallengeLock",
+  "HostedNonceDO",
+  "HostedIdempotencyDO",
+  "ChallengeNotifyDO",
+]
+
+# ── Sandbox KV Namespaces ────────────────────────────────────────────
+[[env.sandbox.kv_namespaces]]
+binding = "VERIFIER_KV_CONFIG"
+id = "9a4024da57364508b8248cf7897c8cbc" # SANDBOX_VERIFY_CONFIG
+
+[[env.sandbox.kv_namespaces]]
+binding = "VERIFIER_KV_BANLIST"
+id = "0095a664810141ad92e460d6b945250f" # SANDBOX_VERIFY_BANLIST
+
+[[env.sandbox.kv_namespaces]]
+binding = "VERIFIER_KV_RATE_LIMITS"
+id = "9692ea7a62ec4968a43023d59c3e9385" # SANDBOX RATE_LIMIT_CONFIG (shared with provii-management, provii-issuer)
+
+[[env.sandbox.kv_namespaces]]
+binding = "VERIFIER_KV_ISSUER_REGISTRY"
+id = "dca2f36473364c9d9654db62c514e4ae" # Shared with admin-portal SANDBOX_ISSUER_REGISTRY
+
+# ── Hosted-mode KV namespaces (sandbox) ──
+[[env.sandbox.kv_namespaces]]
+binding = "HOSTED_PUBLIC_KEYS"
+id = "25ff633def0b4446a740320fdc9a6930"
+
+[[env.sandbox.kv_namespaces]]
+binding = "ORIGIN_INDEX"
+id = "73743c8cefc94b41b59c0d7189b281cb"
+
+[[env.sandbox.kv_namespaces]]
+binding = "HOSTED_SESSIONS"
+id = "6bd74f47f3624978bef316c261b3f506"
+
+# ── Sandbox Variables ────────────────────────────────────────────────
+[env.sandbox.vars]
+ENVIRONMENT = "sandbox"
+API_VERSION = "1.0.0"
+API_BASE_URL = "https://sandbox-verify.provii.app/v1"
+# docs-gateway origins added for sandbox docs interactive widgets.
+# Same-origin (`docs.provii.app/api/*`) is the primary path via the
+# gateway, so docs pages do NOT make cross-origin credentialed requests to
+# `sandbox-verify.provii.app`. The CORS allowance below is defensive
+# (e.g. Swagger UI / direct fetch tooling). The CORS middleware sets
+# `Access-Control-Allow-Credentials: true` for any allowed origin
+# (provii-verifier/src/worker_routes.rs:230, :299, etc.), but no cookies are
+# scoped to *.provii.app for these docs origins, so the credentials
+# flag is inert in practice for docs-origin requests.
+ALLOWED_ORIGINS = "https://invokeprovii.com,https://*.provii.app,https://docs.provii.app,https://uat-docs.provii.app,https://preview.docs-sandbox.provii.app"
+PROVII_CORS_ORIGINS = "https://invokeprovii.com,https://*.provii.app,https://docs.provii.app,https://uat-docs.provii.app,https://preview.docs-sandbox.provii.app"
+
+# Credit Management API Configuration (matches production)
+CREDIT_MGMT_URL = "https://credit-management.provii.app"
+CREDIT_MGMT_KEY_ID = "provii-verifier"
+
+# Rate limiting (higher for sandbox testing)
+DEFAULT_QUOTA_PER_HOUR = "2000"   # Higher quota for sandbox testing
+SHORT_CODE_LIMIT_PER_HOUR = "200" # Relaxed for sandbox testing
+PER_IP_LIMIT_PER_HOUR = "2000"    # R14: relaxed expert per-IP limit for sandbox load testing
+
+# Security timeouts
+MAX_CHAL_AGE_MS = "300000" # 5 minutes
+NONCE_TTL_SEC = "300"      # 5 minutes
+
+# R15: minimal sharding for sandbox (no 25-way fan-out needed; cold starts acceptable).
+# IDEMPOTENCY_SHARD_COUNT and HOSTED_DO_SHARD_COUNT left unchanged.
+CHALLENGE_SHARD_COUNT = "1"    # R15: sandbox needs no fan-out
+NONCE_SHARD_COUNT = "1"        # R15: sandbox needs no fan-out
+IDEMPOTENCY_SHARD_COUNT = "10" # Optimised for thousands/min
+
+# ── Hosted-mode sandbox configuration ──
+HOSTED_BASE_URL = "https://sandbox-hosted.provii.app"
+SESSION_TTL_SEC = "600"
+SESSION_COOKIE_NAME = "__Host-session-sandbox"
+PKCE_CODE_VERIFIER_LENGTH = "128"
+HOSTED_DO_SHARD_COUNT = "25"
+
+# ── Sandbox Placement ───────────────────────────────────────────────
+[env.sandbox.placement]
+mode = "smart"
+
+# ── Sandbox Cron Triggers ─────────────────────────────────────────
+# R15: sandbox keep-alive cron removed. Cold starts in sandbox are
+# acceptable, and dropping it lets all sandbox DOs hibernate, removing
+# sandbox's share of the DO warm-up cost. Production keep-alive cron is
+# intentionally retained (see [triggers] in the production block above).
+
+# ── Sandbox Analytics Engine ───────────────────────────────────────
+[[env.sandbox.analytics_engine_datasets]]
+binding = "VERIFIER_ANALYTICS"
+dataset = "VERIFIER_ANALYTICS"
+
+# ── Sandbox Observability ────────────────────────────────────────────
+# R15: observability disabled in sandbox to cut cost (deploy-time only).
+# Production observability is intentionally left enabled.
+[env.sandbox.observability.traces]
+enabled = false
+destinations = ["grafana-traces"]
+
+[env.sandbox.observability.logs]
+enabled = false
+destinations = ["grafana-logs"]
+
+# ── Sandbox Secrets Store ────────────────────────────────────────────
+# Sandbox uses separate secrets with SANDBOX_ prefix for complete isolation
+[[env.sandbox.secrets_store_secrets]]
+binding = "VERIFIER_MEK"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_MEK_SANDBOX"
+
+
+[[env.sandbox.secrets_store_secrets]]
+binding = "CREDIT_MGMT_HMAC_KEY"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_CREDIT_MGMT_API_KEY_FROM_VERIFIER_SANDBOX"
+
+# Sandbox IP hash salt for GDPR-compliant salted IP hashing in audit logs
+[[env.sandbox.secrets_store_secrets]]
+binding = "VERIFIER_IP_HASH_SALT"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_IP_HASH_SALT_SANDBOX"
+
+# SB-002: STATUS_API_TOKEN migrated from env var to Secrets Store (sandbox).
+[[env.sandbox.secrets_store_secrets]]
+binding = "STATUS_API_TOKEN"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_STATUS_TOKEN_SANDBOX"
+
+# Dual-slot accept for STATUS_API_TOKEN (sandbox).
+[[env.sandbox.secrets_store_secrets]]
+binding = "STATUS_API_TOKEN_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_STATUS_TOKEN_SANDBOX_PREVIOUS"
+
+# ── Hosted-mode secrets (sandbox) ──
+[[env.sandbox.secrets_store_secrets]]
+binding = "HOSTED_MEK"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_HOSTED_MEK_SANDBOX"
+
+[[env.sandbox.secrets_store_secrets]]
+binding = "HOSTED_MEK_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_HOSTED_MEK_SANDBOX_PREVIOUS"
+
+[[env.sandbox.secrets_store_secrets]]
+binding = "SESSION_TOKEN_SECRET"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_SESSION_HMAC_SANDBOX"
+
+[[env.sandbox.secrets_store_secrets]]
+binding = "SESSION_TOKEN_SECRET_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_SESSION_HMAC_SANDBOX_PREVIOUS"
+
+# ── Key Rotation: Previous secrets (optional, set during rotation) ──
+[[env.sandbox.secrets_store_secrets]]
+binding = "VERIFIER_MEK_PREVIOUS"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+secret_name = "PROVII_VERIFIER_MEK_SANDBOX_PREVIOUS"
+
+# SB-001: Sandbox API key for sandbox-specific authentication
+[[env.sandbox.secrets_store_secrets]]
+binding = "SANDBOX_API_KEY"
+secret_name = "PROVII_DEMO_VERIFIER_API_KEY_SANDBOX"
+store_id = "6e32e830825542ef86170c1b634df9e6"
+
+# LT-001: Dedicated provii-loadtest harness key, accepted ADDITIVELY alongside
+# SANDBOX_API_KEY at /v1/register-test-origin so the load-test harness has its
+# own independently-revocable credential rather than riding the shared key.
+[[env.sandbox.secrets_store_secrets]]
+binding = "LOADTEST_API_KEY"
+secret_name = "PROVII_LOADTEST_API_KEY_SANDBOX"
+store_id = "6e32e830825542ef86170c1b634df9e6"

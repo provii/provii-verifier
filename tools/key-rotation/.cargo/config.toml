@@ -1,0 +1,8 @@
+# Override the parent provii-verifier/.cargo/config.toml which sets
+# target = "wasm32-unknown-unknown". This CLI tool runs natively.
+#
+# Cargo uses the closest config for each key; setting `target` here
+# overrides the parent. If building on a non-aarch64 host, override
+# with: cargo check --target x86_64-unknown-linux-gnu
+[build]
+target = "aarch64-apple-darwin"

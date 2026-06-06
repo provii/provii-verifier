@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+#Production WASM bundle leak check.
+#
+# Runs after the main `CI/CD Pipeline` workflow finishes and pulls down
+# the `worker-wasm-production` artefact. Decodes the wasm binary to
+# strings and fails the check if any of the following appear:
+#
+#   1. `docs-sbx-`, the literal prefix minted by the sandbox test
+#      issuer registration endpoint. Any occurrence in the
+#      production bundle implies the sandbox feature was linked in.
+#   2. `mwallet-sbx-`, the equivalent prefix minted by the mobile
+#      sandbox flow. Same invariant.
+#   3. `register-test-issuer-client`, the route path gated behind
+#      the `sandbox_only_register_test_issuer_client` Cargo feature.
+#   4. Base64url strings of exactly 43 or 44 characters consisting of
+#      `[A-Za-z0-9_-]` that are NOT known harmless long identifiers.
+#      Ed25519 32-byte seeds encode to 43 chars URL-safe (no padding);
+#      a 256-bit HMAC or symmetric key encodes to the same width. A
+#      raw seed in the compiled artefact would be a catastrophic leak.
+#
+# Pairs with the compile-time guard compile-time assertion (`build.rs`): that
+# fires before codegen if the production+sandbox combination is used;
+# this workflow fires on the linked bundle even if someone bypasses
+# the build script via `--offline`, a vendored Cargo registry, or an
+# edited build.rs. Defence in depth.
+#
+# SHA-pinned actions per the org CI/CD standard (see
+# `Architecture/cicd.std.md`).
+
+name: Prod WASM bundle leak check
+
+# zizmor: ignore[dangerous-triggers]
+# `workflow_run` is required to consume the `worker-wasm-production`
+# artefact produced by the upstream CI/CD Pipeline workflow. Mitigations:
+#   1. The `if:` guard below requires `workflow_run.conclusion == 'success'`
+#      AND `workflow_run.event != 'pull_request'`, so untrusted PR-triggered
+#      runs (which never produce a production artefact anyway) cannot fire
+#      this workflow.
+#   2. Only the production artefact (built without sandbox features) is
+#      downloaded; we never check out PR head code or run untrusted scripts.
+#   3. Permissions are read-only (`contents: read`, `actions: read`).
+on:
+  workflow_run:
+    workflows: ['CI/CD Pipeline']
+    types: [completed]
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Grep production wasm for sandbox leaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only run if the upstream CI/CD pipeline succeeded and actually
+    # produced a production artefact.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request'
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Download the production artefact from the triggering CI run.
+      # `run-id` scopes the download to the upstream workflow that fired
+      # this one; without it the action would look at the current
+      # workflow_run.id which has no artefacts of its own.
+      - name: Download production WASM artefact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: worker-wasm-production
+          path: artefact/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install wabt (for wasm2wat)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wabt
+          wasm2wat --version
+
+      - name: Locate production bundle
+        id: locate
+        run: |
+          WASM=$(find artefact -name '*.wasm' -type f | head -n1)
+          SHIM=$(find artefact -name '*.mjs' -o -name '*.js' -type f | head -n1)
+          if [ -n "$WASM" ]; then
+            echo "target=$WASM" >> $GITHUB_OUTPUT
+            echo "mode=wasm" >> $GITHUB_OUTPUT
+            echo "Production wasm: $WASM ($(stat -c%s "$WASM") bytes)"
+          elif [ -n "$SHIM" ]; then
+            echo "target=$SHIM" >> $GITHUB_OUTPUT
+            echo "mode=shim" >> $GITHUB_OUTPUT
+            echo "Production shim (bundled wasm): $SHIM ($(stat -c%s "$SHIM") bytes)"
+          else
+            echo "ERROR: no .wasm or .mjs/.js file found in artefact/"
+            find artefact -maxdepth 4 -type f
+            exit 2
+          fi
+
+      - name: Extract data-section strings
+        env:
+          TARGET: ${{ steps.locate.outputs.target }}
+          MODE: ${{ steps.locate.outputs.mode }}
+        run: |
+          if [ "$MODE" = "wasm" ]; then
+            wasm2wat "$TARGET" --enable-all 2>/dev/null | strings -a -n 4 > /tmp/wasm-wat-strings.txt || true
+            strings -a -n 4 "$TARGET" > /tmp/strings-raw.txt
+            cat /tmp/wasm-wat-strings.txt /tmp/strings-raw.txt | sort -u > /tmp/strings-all.txt
+          else
+            # Bundled shim: extract all printable strings from the JS bundle
+            strings -a -n 4 "$TARGET" > /tmp/strings-all.txt
+          fi
+          echo "Extracted $(wc -l < /tmp/strings-all.txt) unique strings"
+
+      - name: Check for sandbox prefix leaks
+        run: |
+          # Three-prong check. Each prong exits non-zero on a match so
+          # the step fails fast and shows the offending lines in the
+          # run log (capped at 50 lines per prong to avoid flooding the
+          # CI output with a full data-section dump).
+          # Uses `grep -m 50` instead of `grep | head` to preserve
+          # grep's exit code (pipe to head always returns 0).
+          fail=0
+
+          echo '--- Checking for `docs-sbx-` ---'
+          if grep -n -m 50 'docs-sbx-' /tmp/strings-all.txt; then
+            echo 'FAIL: docs-sbx- prefix present in production wasm'
+            fail=1
+          else
+            echo 'OK: no docs-sbx- literal in production wasm'
+          fi
+
+          echo '--- Checking for `mwallet-sbx-` ---'
+          if grep -n -m 50 'mwallet-sbx-' /tmp/strings-all.txt; then
+            echo 'FAIL: mwallet-sbx- prefix present in production wasm'
+            fail=1
+          else
+            echo 'OK: no mwallet-sbx- literal in production wasm'
+          fi
+
+          echo '--- Checking for `register-test-issuer-client` ---'
+          if grep -n -m 50 'register-test-issuer-client' /tmp/strings-all.txt; then
+            echo 'FAIL: sandbox-only route literal present in production wasm'
+            fail=1
+          else
+            echo 'OK: no sandbox-only route literal in production wasm'
+          fi
+
+          exit $fail
+
+      - name: High-entropy Ed25519-seed scan
+        run: |
+          # Flag any 43- or 44-character base64url strings surviving in
+          # the compiled bundle. A correct build has none: the only
+          # legitimate 256-bit secrets live in Secrets Store and are
+          # injected at runtime, never compiled in. False positives are
+          # conceivable on long identifiers, so we allow an explicit
+          # corpus-level exemption list. Each line is a regex anchored
+          # to the full token.
+          python3 - <<'PY'
+          import re
+          import sys
+
+          # Tokens we intentionally embed in the compiled artefact but
+          # that happen to look base64-url-shaped (e.g. SRI hashes are
+          # base64 but with `+/=` and a different length; these are the
+          # inadvertent exceptions). Keep this list EMPTY by default;
+          # add with a code comment only after the security team signs
+          # off.
+          EXEMPT = set()
+
+          TOKEN = re.compile(r'^[A-Za-z0-9_-]{43,44}$')
+
+          hits = []
+          with open('/tmp/strings-all.txt', 'r', errors='replace') as f:
+              for line in f:
+                  line = line.strip()
+                  if TOKEN.fullmatch(line) and line not in EXEMPT:
+                      hits.append(line)
+
+          if hits:
+              print(f'FAIL: {len(hits)} candidate Ed25519/256-bit-key tokens in prod wasm:')
+              for h in hits[:50]:
+                  print(f'  {h}')
+              if len(hits) > 50:
+                  print(f'  ... and {len(hits) - 50} more')
+              sys.exit(1)
+          print('OK: no 43/44-char base64url tokens in production wasm data sections')
+          PY

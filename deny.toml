@@ -1,0 +1,108 @@
+# cargo-deny configuration for license and security compliance
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+# The path where the advisory database is cloned/fetched into
+db-path = "~/.cargo/advisory-db"
+# The url(s) of the advisory databases to use
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Which crates to check for unmaintained status (all, workspace, transitive, none)
+unmaintained = "all"
+# Ignore specific advisories (use sparingly and document why)
+
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436"
+reason = "paste is a compile-time proc-macro only. No runtime security impact. Tracking serde_valid migration to garde."
+
+# RUSTSEC-2026-0097: rand 0.8/0.9 unsoundness with custom logger + rng()
+# Source: rand 0.8 transitive via provii-crypto-protocol; rand 0.9 transitive
+# via proptest in dev-dependencies.
+# Risk Assessment: NOT TRIGGERED. The Worker uses rand for nonces and ZK
+# randomness via OsRng and ChaCha-based seeded RNGs. We never call rand::rng()
+# and never install a custom logger. The unsoundness path requires both.
+# Review date: 2026-04-25
+# Reviewer: sandbox dev-tools overhaul deploy unblock
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0097"
+reason = "rand 0.8/0.9 unsoundness only triggers when callers install a custom logger AND call rand::rng(). The Worker uses OsRng and ChaCha-based seeded RNGs, never rng() and never a custom logger. The 0.8 transitive comes from provii-crypto-protocol; the 0.9 transitive comes from proptest in dev-dependencies. Neither call site is affected."
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 is a compile-time proc-macro only (pulled via serde_valid_derive -> serde_valid). No runtime security impact. Tracking serde_valid migration to garde."
+
+[licenses]
+version = 2
+# List of explicitly allowed licenses
+# In cargo-deny v2, anything not in `allow` is implicitly denied
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "Zlib",
+  "0BSD",
+  "Unlicense",
+  "CC0-1.0",
+  "AGPL-3.0-only",
+  "LicenseRef-Proprietary",
+]
+# The confidence threshold for detecting a license from license text
+confidence-threshold = 0.8
+
+# Clarify licenses for provii-crypto crates (relicensed to Apache-2.0 on 2026-04-02)
+[[licenses.clarify]]
+crate = "provii-crypto-verifier"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "provii-crypto-protocol"
+expression = "Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "provii-crypto-commons"
+expression = "Apache-2.0"
+license-files = []
+
+[licenses.private]
+# If true, ignores workspace crates that aren't published
+ignore = true
+
+[bans]
+# Lint level for when multiple versions of the same crate are detected
+multiple-versions = "warn"
+# Lint level for when a crate version requirement is `*`
+# Git dependencies with tags are pinned by tag, so warn instead of deny
+wildcards = "warn"
+# Skip dependencies for workspaces
+workspace-default-features = "allow"
+external-default-features = "allow"
+# Specific crates to deny
+deny = [
+  # Deny old versions of key dependencies with known vulnerabilities
+  { name = "openssl", version = "<0.10.55" },
+]
+# Specific crates to skip checking
+skip = []
+# Specific crates to skip tree checking
+skip-tree = []
+
+[sources]
+# Lint level for what to happen when a crate from a git repository is encountered
+unknown-git = "deny"
+# Lint level for what to happen when a crate from a registry other than crates.io is encountered
+unknown-registry = "deny"
+# List of URLs for allowed crate registries
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# List of URLs for allowed Git repositories
+allow-git = []
+
+[sources.allow-org]
+# GitHub organisations to allow as sources
+github = ["provii"]

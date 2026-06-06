@@ -1,0 +1,218 @@
+[package]
+name = "provii-verifier"
+version = "0.1.0"
+edition = "2021"
+authors = ["tom@maelstrom.au"]
+description = "Groth16-based age verification API for Cloudflare Workers"
+license = "AGPL-3.0-only"
+repository = "https://github.com/provii/provii-verifier"
+resolver = "2"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+# Hybrid package + workspace. The root package targets wasm32 only (worker
+# runtime + wasm-bindgen) and is built by `worker-build` for production
+# deploys. Native-only CLI helpers live in sibling crates under `bins/*` so
+# they can be built without forcing the wasm-only lib to compile on a native
+# target.
+#
+# `bins/ban-entry-decode` is a native CLI used by
+# `provii-management/tests/rotation/banentry-schema.test.ts` to assert the
+# provii-verifier Rust BanEntry deserialise contract matches what the
+# provii-management TS write path produces. Invoke with:
+#   cargo run --manifest-path .../provii-verifier/Cargo.toml \
+#     -p provii-verifier-ban-entry-decode --bin ban-entry-decode -- <json-path>
+#
+# `tools/key-rotation` and `fuzz` are excluded because they have their own
+# `Cargo.lock` files and pre-date the workspace.
+#
+# `default-members = ["."]` pins workspace-aware tooling to the wasm-only
+# root package by default. Without it the new bin would be picked up by:
+#   * `cargo check --locked`        (security-audit.yml)
+#   * `cargo check --all-features`  (ci.yml, deploy.yml)
+#   * `cargo machete` without `-p`
+# all of which previously targeted only the root crate. The bin remains
+# explicitly addressable via `-p provii-verifier-ban-entry-decode` for the
+# cross-language BanEntry harness invocation.
+[workspace]
+members = [
+  "bins/ban-entry-decode",
+  "bins/cors-tests",
+  "bins/rate-limit-tests",
+  "crates/verifier-logic",
+]
+default-members = ["."]
+exclude = ["tools/key-rotation", "fuzz"]
+
+[dependencies]
+# Core worker runtime
+worker = { version = "0.7.4", features = ["queue"] }
+
+getrandom = { version = "0.2", features = ["js"] }
+schemars = { version = "1.0.4", features = ["uuid1", "preserve_order"] }
+
+# Provii verifier logic (pure Rust, native-testable, coverage-measured)
+provii-verifier-logic = { path = "crates/verifier-logic", version = "0.1.0" }
+
+# Provii crypto libraries (local path for development; CI uses git tags)
+provii-crypto-verifier = { path = "../provii-crypto/crypto-verifier" }
+provii-crypto-protocol = { path = "../provii-crypto/crypto-protocol" }
+provii-crypto-commons = { path = "../provii-crypto/crypto-commons" }
+# Provii shared audit logging (local path for development; CI uses git tags)
+provii-audit = { path = "../provii-audit/rust" }
+
+# Async runtime
+async-trait = "0.1"
+futures = "0.3"
+
+# Serialisation
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Security & Cryptography
+sha2 = "0.10"
+blake2 = "0.10"
+blake3 = "1.5"
+base64 = "0.22"
+hmac = "0.12"
+subtle = "2.6"
+zeroize = { version = "1.7", features = ["derive"] }
+uuid = { version = "1.7", features = ["v4", "serde", "js"] }
+rand = { version = "0.8", features = ["std_rng"] }
+once_cell = "1.20"
+hex = "0.4"
+argon2 = { version = "0.5", features = ["std"] }
+
+unicode-normalization = "0.1"
+bellman = { version = "0.14", default-features = false }
+
+# Jubjub curve for issuer VK validation
+jubjub = "0.10"
+group = "0.13"
+
+# BLS12-381 for Groth16
+bls12_381 = "0.8"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# URL handling
+url = "2.5"
+percent-encoding = "2.3"
+
+# Utilities
+regex = { version = "1.10", default-features = false, features = [
+  "std",
+  "perf",
+] }
+chrono = { version = "0.4", default-features = false, features = [
+  "std",
+  "clock",
+  "serde",
+] }
+aes-gcm = "0.10"
+seahash = "4.1"
+urlencoding = "2.1"
+serde_valid = "0.25"
+
+# Debugging
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+web-sys = { version = "0.3", features = [
+  "console",
+  "Crypto",
+  "SubtleCrypto",
+  "CryptoKey",
+  "Window",
+] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+tokio = { version = "1", default-features = false, features = [
+  "sync",
+  "macros",
+  "rt",
+] }
+aes-gcm = "0.10"
+tokio-test = "0.4"
+serial_test = "3.1"
+# Test-only: used to mint signed DobAttestations in the attestation
+# binding unit tests. Not pulled into the prod wasm bundle.
+ed25519-dalek = { version = "2.1", default-features = false, features = [
+  "alloc",
+  "zeroize",
+] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = "0.5"
+proptest = "1.5"
+
+[[bench]]
+name = "argon2id_bench"
+harness = false
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = true
+# Path remapping for reproducibility is done in scripts/reproducible-build.sh via
+# the stable --remap-path-prefix flag, not the trim-paths profile option (which
+# tripped an unstable-feature requirement on the pinned toolchain).
+
+[profile.release.package."*"]
+opt-level = "z"
+
+[features]
+default = ["console_error_panic_hook"]
+__proptest_worker_headers = [
+] # Gate for proptest that needs wasm32 worker::Headers
+
+# Sandbox-only feature gate for the docs-gateway test issuer registration
+# endpoint and supporting validation code. The name is
+# deliberately long and project-specific to prevent transitive-dep feature
+# unification from accidentally turning it on in production builds. CI sandbox
+# build invokes:
+#   worker-build --release -- --features sandbox_only_register_test_issuer_client
+# Production CI build omits the flag.
+sandbox_only_register_test_issuer_client = []
+
+# Security-focused lints
+[lints.rust]
+unsafe_code = "forbid"
+dead_code = "warn"
+
+[lints.clippy]
+# Panic prevention
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+# Arithmetic safety
+arithmetic_side_effects = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+# Indexing safety
+indexing_slicing = "deny"
+string_slice = "deny"
+# Code quality (keep existing denies)
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# Style (keep existing allows that are NOT safety-related)
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+too_many_arguments = "allow"
+doc_lazy_continuation = "allow"
