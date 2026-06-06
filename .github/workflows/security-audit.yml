@@ -1,0 +1,713 @@
+name: Security Audit
+
+# OWASP ASVS V15.2.1, V15.2.2, V15.2.3 Compliance
+# Automated security scanning workflow with full checks
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/dependabot.yml'
+      - '.github/CODEOWNERS'
+      - '.gitignore'
+  pull_request:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.github/dependabot.yml'
+      - '.github/CODEOWNERS'
+      - '.gitignore'
+  schedule:
+    # Weekly security scan on Monday at 2 AM UTC
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+# Minimal permissions (principle of least privilege)
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+  actions: read  # Required for upload-sarif to look up workflow runs
+
+jobs:
+  # === SAST Scanning with Clippy (Security Lints) ===
+  sast-clippy:
+    name: SAST - Clippy Security Lints
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "security-audit"
+
+      - name: Run Clippy security lints
+        run: |
+          # Run clippy with crate-level lint configuration from Cargo.toml
+          # Security lints are configured in [lints.clippy] section
+          # Critical lints: panic, todo, unimplemented, dbg_macro, print_stdout, print_stderr
+          # Allowed lints (false-positive heavy): unwrap_used, expect_used, arithmetic_side_effects
+          cargo clippy --all-features --lib -- -D warnings
+
+  # === SAST Scanning with Semgrep ===
+  sast-semgrep:
+    name: SAST - Semgrep
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    env:
+      HAS_SEMGREP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN != '' }}
+
+    container:
+      image: semgrep/semgrep:1.60.1@sha256:e8c86dc19463d0b27e5cf44bac3a900de0826e934c366dd7648fa61571d8c872
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Run Semgrep (blocking pass, with token)
+        if: ${{ env.HAS_SEMGREP_TOKEN == 'true' }}
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/rust \
+            --config=p/secrets \
+            --config=p/security-audit \
+            --config=.semgrep/ \
+            --error \
+            --severity ERROR \
+            --severity WARNING
+
+      - name: Run Semgrep (local rules only, no token)
+        if: ${{ env.HAS_SEMGREP_TOKEN != 'true' }}
+        run: |
+          semgrep scan \
+            --config=.semgrep/ \
+            --error \
+            --severity ERROR \
+            --severity WARNING
+
+      - name: Run Semgrep SARIF (for GHAS)
+        if: ${{ always() && env.HAS_SEMGREP_TOKEN == 'true' }}
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          semgrep scan \
+            --config=p/owasp-top-ten \
+            --config=p/rust \
+            --config=p/secrets \
+            --config=p/security-audit \
+            --config=.semgrep/ \
+            --sarif \
+            --output=semgrep-results.sarif \
+            --verbose \
+          || true
+
+      - name: Upload Semgrep SARIF results
+        if: ${{ always() && env.HAS_SEMGREP_TOKEN == 'true' }}
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep
+
+  # === Dependency Vulnerability Scanning ===
+  dependency-scan:
+    name: Dependency Scanning - Cargo Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version "0.22.1" --locked
+
+      - name: Run cargo audit
+        run: |
+          cargo audit \
+            --deny warnings \
+            --deny unsound \
+            --deny yanked \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0097
+
+      - name: Generate audit report
+        if: always()
+        run: |
+          cargo audit --json > audit-report.json
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dependency-audit-report
+          path: audit-report.json
+          retention-days: 30
+
+  # === Dependency Review (PRs only) ===
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          deny-licenses: GPL-3.0, LGPL-3.0
+
+  # === Secret Scanning ===
+  secret-scan:
+    name: Secret Scanning - Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE_KEY }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # Full history for secret scanning
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: '8.21.2'
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -C /tmp -xzf /tmp/gitleaks.tar.gz gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --no-banner --exit-code 1
+
+  # === Workflow Security Scanning (Zizmor) ===
+  zizmor:
+    name: Workflow Security - Zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Run Zizmor
+        uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
+        with:
+          min-severity: high
+          advanced-security: false
+
+  # === License Compliance ===
+  license-compliance:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version "0.19.7" --locked
+
+      - name: Check licenses with cargo-deny
+        run: cargo deny check licenses
+
+      - name: Upload license report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: license-compliance-report
+          path: deny.toml
+          retention-days: 90
+
+  # === Code Quality Checks ===
+  code-quality:
+    name: Code Quality - Format Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt -- --check
+
+  # === Unsafe Code Audit ===
+  unsafe-code-audit:
+    name: Unsafe Code Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+
+      - name: Search for unsafe code blocks
+        run: |
+          echo "Searching for unsafe code blocks..."
+          # Look for actual unsafe blocks (not forbid declarations or comments)
+          # Matches: unsafe { or unsafe fn or unsafe impl
+          UNSAFE_COUNT=$(grep -rE "unsafe\s*\{|unsafe\s+fn\s|unsafe\s+impl\s" src/ --include="*.rs" 2>/dev/null | wc -l)
+
+          if [ "$UNSAFE_COUNT" -gt 0 ]; then
+            echo "Found $UNSAFE_COUNT unsafe code usages:"
+            grep -rnE "unsafe\s*\{|unsafe\s+fn\s|unsafe\s+impl\s" src/ --include="*.rs"
+            echo ""
+            echo "Unsafe code blocks found. All unsafe blocks must have SAFETY comments."
+            exit 1
+          else
+            echo "No unsafe code blocks found (as expected - unsafe_code is forbidden)"
+          fi
+
+      - name: Verify unsafe_code is forbidden in Cargo.toml
+        run: |
+          if grep -q 'unsafe_code = "forbid"' Cargo.toml; then
+            echo "unsafe_code is properly forbidden in Cargo.toml"
+          else
+            echo "unsafe_code should be set to 'forbid' in [lints.rust]"
+            exit 1
+          fi
+
+  # === Cryptographic Validation ===
+  crypto-validation:
+    name: Cryptographic Implementation Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Check for weak crypto patterns
+        run: |
+          echo "Checking for weak cryptographic patterns..."
+
+          # Check for MD5 usage
+          if grep -r "md5\|Md5\|MD5" src/ --include="*.rs"; then
+            echo "MD5 usage detected (weak hash algorithm)"
+            exit 1
+          fi
+
+          # Check for SHA1 usage
+          if grep -r "sha1\|Sha1\|SHA1" src/ --include="*.rs"; then
+            echo "SHA1 usage detected (weak hash algorithm)"
+            exit 1
+          fi
+
+          # Check for hardcoded secrets patterns (exclude test code and encrypted secrets)
+          SECRETS=$(grep -rE "(secret|password|api_key)\s*=\s*['\"][a-zA-Z0-9]{16,}" src/ --include="*.rs" 2>/dev/null | \
+            grep -v "_test\.rs:" | \
+            grep -v "mod tests" | \
+            grep -v "encrypted_" | \
+            grep -v "test" | \
+            grep -v "Test" || true)
+
+          if [ -n "$SECRETS" ]; then
+            echo "$SECRETS"
+            echo "Potential hardcoded secrets detected in non-test code"
+            exit 1
+          fi
+
+          echo "No weak crypto patterns detected"
+
+      - name: Verify approved crypto libraries
+        run: |
+          echo "Verifying use of approved cryptographic libraries..."
+
+          # Check Cargo.toml for approved crypto crates
+          if grep -E "sha2|blake2|blake3|argon2|hmac" Cargo.toml; then
+            echo "Using approved cryptographic libraries"
+          else
+            echo "No cryptographic libraries found in Cargo.toml"
+          fi
+
+  # === Supply Chain Security ===
+  supply-chain:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify Cargo.lock exists
+        run: |
+          if [ ! -f "Cargo.lock" ]; then
+            echo "Cargo.lock is missing - required for reproducible builds"
+            exit 1
+          fi
+          echo "Cargo.lock exists"
+
+      - name: Check for unpinned dependencies
+        run: |
+          if grep -E '^\s*version\s*=\s*"\*"' Cargo.toml; then
+            echo "Found unpinned dependencies (version = \"*\") - this is not allowed"
+            exit 1
+          fi
+          echo "No unpinned dependencies found"
+
+  # === Trivy Filesystem Scan ===
+  trivy-scan:
+    name: Trivy FS Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '1'
+          limit-severities-for-sarif: "true"
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy
+
+  # === CodeQL Security Analysis ===
+  security-summary:
+    name: Security Summary Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs:
+      - sast-clippy
+      - sast-semgrep
+      - dependency-scan
+      - dependency-review
+      - secret-scan
+      - zizmor
+      - license-compliance
+      - code-quality
+      - unsafe-code-audit
+      - crypto-validation
+      - supply-chain
+      - trivy-scan
+    if: always()
+    timeout-minutes: 5
+
+    steps:
+      - name: Generate security summary
+        env:
+          CLIPPY_STATUS: ${{ needs.sast-clippy.result == 'success' && 'Passed' || 'Failed' }}
+          SEMGREP_STATUS: ${{ needs.sast-semgrep.result == 'success' && 'Passed' || 'Failed' }}
+          DEPSCAN_STATUS: ${{ needs.dependency-scan.result == 'success' && 'Passed' || 'Failed' }}
+          DEPREVIEW_STATUS: ${{ needs.dependency-review.result == 'success' && 'Passed' || needs.dependency-review.result == 'skipped' && 'Skipped' || 'Failed' }}
+          SECRET_STATUS: ${{ needs.secret-scan.result == 'success' && 'Passed' || 'Failed' }}
+          ZIZMOR_STATUS: ${{ needs.zizmor.result == 'success' && 'Passed' || 'Failed' }}
+          LICENSE_STATUS: ${{ needs.license-compliance.result == 'success' && 'Passed' || 'Failed' }}
+          QUALITY_STATUS: ${{ needs.code-quality.result == 'success' && 'Passed' || 'Failed' }}
+          UNSAFE_STATUS: ${{ needs.unsafe-code-audit.result == 'success' && 'Passed' || 'Failed' }}
+          CRYPTO_STATUS: ${{ needs.crypto-validation.result == 'success' && 'Passed' || 'Failed' }}
+          SUPPLY_STATUS: ${{ needs.supply-chain.result == 'success' && 'Passed' || 'Failed' }}
+          TRIVY_STATUS: ${{ needs.trivy-scan.result == 'success' && 'Passed' || 'Failed' }}
+          CODEQL_STATUS: ${{ needs.codeql-analysis.result == 'success' && 'Passed' || needs.codeql-analysis.result == 'skipped' && 'Skipped' || 'Failed' }}
+        run: |
+          echo "## Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST - Clippy | $CLIPPY_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| SAST - Semgrep | $SEMGREP_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency Scan | $DEPSCAN_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dependency Review | $DEPREVIEW_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret Scan | $SECRET_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow Security (Zizmor) | $ZIZMOR_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| License Compliance | $LICENSE_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Code Quality | $QUALITY_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unsafe Code Audit | $UNSAFE_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Crypto Validation | $CRYPTO_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Supply Chain | $SUPPLY_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trivy FS Scan | $TRIVY_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "| CodeQL Analysis | $CODEQL_STATUS |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**OWASP ASVS Compliance:** V15.2.1, V15.2.2, V15.2.3" >> $GITHUB_STEP_SUMMARY
+
+      - name: Notify on failure
+        if: >-
+          needs.sast-clippy.result == 'failure'
+          || needs.sast-semgrep.result == 'failure'
+          || needs.dependency-scan.result == 'failure'
+          || needs.dependency-review.result == 'failure'
+          || needs.license-compliance.result == 'failure'
+          || needs.secret-scan.result == 'failure'
+          || needs.zizmor.result == 'failure'
+          || needs.code-quality.result == 'failure'
+          || needs.unsafe-code-audit.result == 'failure'
+          || needs.crypto-validation.result == 'failure'
+          || needs.supply-chain.result == 'failure'
+          || needs.trivy-scan.result == 'failure'
+        env:
+          RESULT_CLIPPY: ${{ needs.sast-clippy.result }}
+          RESULT_SEMGREP: ${{ needs.sast-semgrep.result }}
+          RESULT_DEPSCAN: ${{ needs.dependency-scan.result }}
+          RESULT_DEPREVIEW: ${{ needs.dependency-review.result }}
+          RESULT_LICENSE: ${{ needs.license-compliance.result }}
+          RESULT_SECRET: ${{ needs.secret-scan.result }}
+          RESULT_ZIZMOR: ${{ needs.zizmor.result }}
+          RESULT_QUALITY: ${{ needs.code-quality.result }}
+          RESULT_UNSAFE: ${{ needs.unsafe-code-audit.result }}
+          RESULT_CRYPTO: ${{ needs.crypto-validation.result }}
+          RESULT_SUPPLY: ${{ needs.supply-chain.result }}
+          RESULT_TRIVY: ${{ needs.trivy-scan.result }}
+        run: |
+          echo "Security checks failed. Results:"
+          echo "  sast-clippy=$RESULT_CLIPPY"
+          echo "  sast-semgrep=$RESULT_SEMGREP"
+          echo "  dependency-scan=$RESULT_DEPSCAN"
+          echo "  dependency-review=$RESULT_DEPREVIEW"
+          echo "  license-compliance=$RESULT_LICENSE"
+          echo "  secret-scan=$RESULT_SECRET"
+          echo "  zizmor=$RESULT_ZIZMOR"
+          echo "  code-quality=$RESULT_QUALITY"
+          echo "  unsafe-code-audit=$RESULT_UNSAFE"
+          echo "  crypto-validation=$RESULT_CRYPTO"
+          echo "  supply-chain=$RESULT_SUPPLY"
+          echo "  trivy-scan=$RESULT_TRIVY"
+          exit 1

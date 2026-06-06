@@ -1,0 +1,45 @@
+{
+  "socialmedia.com": [
+    {
+      "kid": "sm-2024-01",
+      "sk_b64": "REPLACE_WITH_BASE64_ENCODED_32_BYTE_ED25519_SEED",
+      "not_before": 1704067200,
+      "expires_at": 1735689600,
+      "comment": "Primary key for socialmedia.com, valid through 2024"
+    },
+    {
+      "kid": "sm-2023-12",
+      "sk_b64": "REPLACE_WITH_BASE64_ENCODED_32_BYTE_ED25519_SEED",
+      "not_before": 1701388800,
+      "expires_at": 1704067200,
+      "comment": "Previous key, kept for grace period"
+    }
+  ],
+  "adultcontent.com": [
+    {
+      "kid": "ac-2024-01",
+      "sk_b64": "REPLACE_WITH_BASE64_ENCODED_32_BYTE_ED25519_SEED",
+      "not_before": 1704067200,
+      "expires_at": 0,
+      "comment": "No expiration set (0 = never expires)"
+    }
+  ],
+  "*.example.com": [
+    {
+      "kid": "wildcard-example-2024",
+      "sk_b64": "REPLACE_WITH_BASE64_ENCODED_32_BYTE_ED25519_SEED",
+      "not_before": 1704067200,
+      "expires_at": 1735689600,
+      "comment": "Wildcard key for all subdomains of example.com"
+    }
+  ],
+  "localhost": [
+    {
+      "kid": "dev-key-001",
+      "sk_b64": "EXAMPLE_ONLY_REPLACE_WITH_REAL_KEY_DO_NOT_USE",
+      "not_before": 0,
+      "expires_at": 0,
+      "comment": "⚠️ DEVELOPMENT ONLY - REPLACE WITH REAL KEY BEFORE ANY USE"
+    }
+  ]
+}

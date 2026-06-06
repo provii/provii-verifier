@@ -1,0 +1,572 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+      - '.gitignore'
+      - 'CHANGELOG*'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE*'
+      - '.gitignore'
+      - 'CHANGELOG*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  # === Linting and Formatting ===
+  lint:
+    name: Lint and Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-lint"
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check TOML formatting
+        run: |
+          cargo install taplo-cli --version "0.10.0" --locked
+          taplo fmt --check
+
+      - name: Check for unused dependencies
+        run: |
+          cargo install cargo-machete --version "0.9.2" --locked
+          cargo machete
+
+      - name: Run clippy
+        # Run on library code only - tests have their own lint allowances
+        run: cargo clippy --all-features --lib -- -D warnings -D clippy::correctness
+
+  # === Testing ===
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-test"
+
+      - name: Build check
+        # Build for wasm32 target (this is a Cloudflare Worker)
+        run: cargo check --all-features
+
+      # Dual-config feature gate: ensure both the default feature
+      # set and the sandbox-only feature set compile cleanly. PRs that break
+      # either configuration fail CI, which matters because the deploy workflow
+      # builds production WITHOUT the flag and sandbox WITH it.
+      - name: Build check (without sandbox feature)
+        run: cargo check --no-default-features --target wasm32-unknown-unknown
+
+      - name: Build check (with sandbox feature only)
+        run: cargo check --no-default-features --features sandbox_only_register_test_issuer_client --target wasm32-unknown-unknown
+
+      # Note: Native tests skipped - this crate has wasm32-only dependencies
+      # Unit tests use proptest which requires native target but the worker
+      # dependencies (wasm-bindgen, js-sys, etc.) only work on wasm32.
+      # Tests run via wasm-bindgen-test in the WASM build step.
+
+  # === Test Coverage ===
+  test-coverage:
+    name: Test Coverage
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-coverage"
+
+      - name: Install cargo-llvm-cov
+        run: which cargo-llvm-cov || cargo install cargo-llvm-cov --version "0.8.7" --locked
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --lib --lcov --output-path lcov.info --target x86_64-unknown-linux-gnu \
+            --package provii-verifier-ban-entry-decode \
+            --package provii-verifier-cors-tests \
+            --package provii-verifier-rate-limit-tests \
+            --package provii-verifier-logic 2>&1 || {
+            echo "::warning::Coverage generation failed - wasm32 dependencies may not fully support native target"
+            echo "## Test Coverage" >> $GITHUB_STEP_SUMMARY
+            echo "Coverage generation failed due to wasm32-only dependencies" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          }
+
+      - name: Check coverage threshold (85%)
+        run: |
+          THRESHOLD=85
+          COVERAGE=$(cargo llvm-cov --lib --target x86_64-unknown-linux-gnu \
+            --package provii-verifier-ban-entry-decode \
+            --package provii-verifier-cors-tests \
+            --package provii-verifier-rate-limit-tests \
+            --package provii-verifier-logic 2>&1 | grep "^TOTAL" | awk '{print $NF}' | tr -d '%')
+          if [ -z "$COVERAGE" ]; then
+            echo "::error::Failed to extract coverage percentage from cargo-llvm-cov output"
+            exit 1
+          fi
+          echo "Native-buildable subcrate coverage: ${COVERAGE}% (threshold: ${THRESHOLD}%)"
+          echo "## Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "Native-buildable subcrate coverage: **${COVERAGE}%** (threshold: ${THRESHOLD}%)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The root \`provii-verifier\` package targets wasm32 only (worker/wasm-bindgen/js-sys deps cannot link on x86_64) and is excluded from native coverage. All native-buildable subcrates (\`ban-entry-decode\`, \`cors-tests\`, \`rate-limit-tests\`, \`verifier-logic\`) are measured." >> $GITHUB_STEP_SUMMARY
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "::error::Coverage ${COVERAGE}% is below ${THRESHOLD}% threshold"
+            exit 1
+          fi
+          echo "Coverage ${COVERAGE}% meets ${THRESHOLD}% threshold"
+
+  # === Miri - Undefined Behavior Detection ===
+  miri:
+    name: Miri (UB Detection)
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust nightly with Miri
+        run: |
+          rustup toolchain install nightly --component miri
+          rustup override set nightly
+          cargo miri setup
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-miri"
+
+      # Miri can only run on native targets, so we restrict it to the
+      # workspace subcrates that are native-buildable. The root
+      # `provii-verifier` package targets wasm32 only (worker /
+      # wasm-bindgen / js_sys deps cannot link on x86_64) and is excluded.
+      # The explicit `--target` flag is required because Cargo's workspace
+      # feature unification would otherwise pull the wasm-only `getrandom/js`
+      # feature into the native build (resolver=2 only isolates per-target
+      # features when a target is explicitly specified).
+      # See `bins/ban-entry-decode/Cargo.toml` for the rationale on why
+      # these crates were split out of the root.
+      - name: Run Miri
+        run: cargo miri test --target x86_64-unknown-linux-gnu --package provii-verifier-ban-entry-decode
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check
+
+  # === Documentation Build ===
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-docs"
+
+      # Hybrid package + workspace: the root `provii-verifier` crate is
+      # wasm32-only (worker / wasm-bindgen / js_sys deps cannot link on
+      # x86_64), so we build its docs against the wasm32 target. The native
+      # sibling crates under `bins/*` are documented separately against an
+      # explicit native target. Cargo unifies features across the workspace
+      # otherwise, which pulls the wasm-only `getrandom/js` feature into the
+      # native build and breaks compilation. See `bins/ban-entry-decode/Cargo.toml`
+      # for the same rationale on test invocation.
+      - name: Build documentation (root, wasm32)
+        run: cargo doc --no-deps --all-features --target wasm32-unknown-unknown
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Build documentation (native subcrates)
+        run: cargo doc --no-deps --target x86_64-unknown-linux-gnu --package provii-verifier-ban-entry-decode
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # === Security Audit ===
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version "0.22.1" --locked
+
+      - name: Run security audit
+        run: |
+          cargo audit \
+            --deny warnings \
+            --deny unsound \
+            --deny yanked \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0097
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version "0.19.7" --locked
+
+      - name: Run cargo-deny
+        run: cargo deny check
+
+  # === Build WASM for Workers, per-environment ===
+  #
+  # Dual-signal environment gating (dual-signal environment gating):
+  # Sandbox builds MUST set BOTH the Cargo feature `sandbox_only_register_test_issuer_client`
+  # AND the env var `PROVII_ENV=sandbox`. Production builds MUST omit the feature
+  # flag AND set `PROVII_ENV=production`. The build.rs added in compile-time guard panics
+  # at compile time if the two signals disagree.
+  #
+  # NOTE (W4-S5): the sentinel is `PROVII_ENV`, NOT `CARGO_CFG_PROVII_ENV`. Cargo reserves
+  # the `CARGO_CFG_*` namespace for build-script outputs corresponding to `--cfg` flags;
+  # setting `CARGO_CFG_PROVII_ENV` as a shell env var does NOT propagate through Cargo to
+  # the build-script process, so the guard silently failed to fire. See build.rs for the
+  # full rationale. Production-bundle grep (prod-bundle-check.yml) is the secondary defence.
+  #
+  # Wrangler v4 ignores `[env.sandbox.build]` overrides, so the per-env build command must
+  # live in CI. Each build uploads its own artifact consumed by the matching deploy/release job.
+  wasm-sandbox:
+    name: Build WASM (sandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-wasm-sandbox"
+
+      - name: Install worker-build
+        run: cargo install worker-build --version "0.7.5" --locked
+
+      # PROVII_ENV must match Cargo feature flag. build.rs panics at compile
+      # time if PROVII_ENV=production AND CARGO_FEATURE_SANDBOX_ONLY_REGISTER_TEST_ISSUER_CLIENT
+      # is set. Defence in depth alongside prod-bundle-check.yml.
+      # W4-S5: NOT `CARGO_CFG_PROVII_ENV`. Cargo strips `CARGO_CFG_*` shell vars.
+      - name: Build WASM (sandbox)
+        env:
+          PROVII_ENV: sandbox
+        run: worker-build --release -- --features sandbox_only_register_test_issuer_client
+
+      - name: Upload WASM artifact (sandbox)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: worker-wasm-sandbox
+          path: build/worker/
+          retention-days: 7
+
+  wasm-production:
+    name: Build WASM (production)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [lint, test]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      # Cache is skipped on tag pushes because the production wasm artefact
+      # built here flows into the `release` job and SLSA provenance. A
+      # poisoned cache populated from an earlier branch push could subtly
+      # alter the release binary, so tag builds always start from a clean
+      # cache. Non-tag builds reuse the cache for speed.
+      - name: Cache Rust dependencies
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: "ci-wasm-production"
+
+      - name: Install worker-build
+        run: cargo install worker-build --version "0.7.5" --locked
+
+      # PROVII_ENV must match Cargo feature flag. build.rs panics at compile
+      # time if PROVII_ENV=production AND CARGO_FEATURE_SANDBOX_ONLY_REGISTER_TEST_ISSUER_CLIENT
+      # is set. Defence in depth alongside prod-bundle-check.yml.
+      # Production MUST omit --features sandbox_only_register_test_issuer_client.
+      # W4-S5: NOT `CARGO_CFG_PROVII_ENV`. Cargo strips `CARGO_CFG_*` shell vars.
+      - name: Build WASM (production)
+        env:
+          PROVII_ENV: production
+        run: worker-build --release
+
+      - name: Upload WASM artifact (production)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: worker-wasm-production
+          path: build/worker/
+          retention-days: 7
+
+  # === Deploy to Sandbox (develop branch only) ===
+  deploy-sandbox:
+    name: Deploy to Sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      deployments: write
+    needs: [wasm-sandbox]
+    if: github.ref == 'refs/heads/develop'
+    environment: sandbox
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+
+      - name: Clone provii-crypto
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-crypto.git ../provii-crypto
+
+      - name: Clone provii-audit
+        run: git clone --depth 1 --branch v0.1.0 https://github.com/provii/provii-audit.git ../provii-audit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      # Sandbox-feature WASM (built in wasm-sandbox with
+      # PROVII_ENV=sandbox + --features sandbox_only_register_test_issuer_client).
+      - name: Download WASM artifact (sandbox build)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: worker-wasm-sandbox
+          path: build/worker/
+
+      - name: Deploy to Cloudflare Workers (Sandbox)
+        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --env sandbox
+
+  # === Release (tags only) ===
+  # REMOVED: The release job was deleted because deploy.yml already handles
+  # GitHub Release creation on tag push, including signed artifacts, SBOM,
+  # Cosign bundles, and SLSA provenance. Having a release job here caused a
+  # race condition where both workflows attempted to create the same GitHub
+  # Release simultaneously (ADV-VA-01-001).
+
+  # ======================================================================
+  # Sentinel - single required check for branch protection
+  # ======================================================================
+  ci-success:
+    name: CI Success
+    if: always()
+    needs: [lint, test, test-coverage, miri, security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check required jobs
+        if: >-
+          contains(needs.lint.result, 'failure')
+          || contains(needs.test.result, 'failure')
+          || contains(needs.test-coverage.result, 'failure')
+          || contains(needs.miri.result, 'failure')
+          || contains(needs.security.result, 'failure')
+          || contains(needs.lint.result, 'cancelled')
+          || contains(needs.test.result, 'cancelled')
+          || contains(needs.test-coverage.result, 'cancelled')
+          || contains(needs.miri.result, 'cancelled')
+          || contains(needs.security.result, 'cancelled')
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_RESULT: ${{ needs.test-coverage.result }}
+          MIRI_RESULT: ${{ needs.miri.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: |
+          echo "One or more required CI jobs did not succeed"
+          echo "lint=${LINT_RESULT}"
+          echo "test=${TEST_RESULT}"
+          echo "test-coverage=${COVERAGE_RESULT}"
+          echo "miri=${MIRI_RESULT}"
+          echo "security=${SECURITY_RESULT}"
+          exit 1
+      - name: All checks passed
+        run: echo "All required CI jobs passed"

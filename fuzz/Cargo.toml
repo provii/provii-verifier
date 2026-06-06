@@ -1,0 +1,42 @@
+[package]
+name = "provii-verifier-fuzz"
+version = "0.0.0"
+publish = false
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+base64 = "0.22"
+blake2 = "0.10"
+sha2 = "0.10"
+hex = "0.4"
+serde_json = "1.0"
+hmac = "0.12"
+
+[dependencies.provii-verifier]
+path = ".."
+
+[[bin]]
+name = "fuzz_hmac_auth"
+path = "fuzz_targets/fuzz_hmac_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_input_validation"
+path = "fuzz_targets/fuzz_input_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jwks_parsing"
+path = "fuzz_targets/fuzz_jwks_parsing.rs"
+test = false
+doc = false
+bench = false

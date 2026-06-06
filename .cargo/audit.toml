@@ -1,0 +1,29 @@
+# Cargo audit configuration
+# https://rustsec.org/advisories/
+
+[advisories]
+# Ignore unmaintained transitive dependencies that we cannot directly fix
+# These come from ark-bls12-381 -> ark-ec -> ark-ff dependency chain
+ignore = [
+  # derivative is unmaintained - used by ark-ec, ark-poly via ark-bls12-381
+  # No action we can take until ark-* crates update their dependencies
+  "RUSTSEC-2024-0388",
+
+  # paste is unmaintained - used by ark-ff via ark-bls12-381
+  # No action we can take until ark-* crates update their dependencies
+  "RUSTSEC-2024-0436",
+
+  # rand 0.8/0.9 unsoundness only triggers when callers use `rand::rng()`
+  # together with a custom logger. The Worker uses rand for nonces and ZK
+  # randomness via OsRng / ChaCha-based seeded RNGs, never `rng()` and never
+  # a custom logger. The 0.8 transitive comes from provii-crypto-protocol;
+  # the 0.9 transitive comes from proptest in dev-dependencies. Neither
+  # call site is affected by this advisory.
+  "RUSTSEC-2026-0097",
+
+  # proc-macro-error2 is unmaintained - a build-time-only proc-macro helper
+  # pulled via serde_valid_derive -> serde_valid. It runs ONLY at compile time
+  # to generate derive code, so it carries no runtime attack surface. No action
+  # we can take until serde_valid updates serde_valid_derive's macro deps.
+  "RUSTSEC-2026-0173",
+]

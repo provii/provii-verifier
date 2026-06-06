@@ -1,0 +1,260 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+# Weekly CI health-check on the deployed production WASM.
+#
+# `prod-bundle-check.yml` catches sandbox leaks at CI time,
+# checking the artefact straight out of `worker-build`. This workflow closes the
+# loop on what is ACTUALLY running in production by pulling the bundle
+# back from Cloudflare's edge once a week and re-running the same
+# string-leak grep. It catches three failure modes the CI-time check
+# does not:
+#
+#   1. Out-of-band `wrangler deploy` from a developer laptop bypassing
+#      the deploy.yml gating.
+#   2. Drift between what `actions/upload-artifact` stored and what the
+#      Cloudflare control plane actually accepted (compression / shim
+#      rewrites / version-metadata smuggling).
+#   3. A future regression where someone disables prod-bundle-check.yml
+#      in a PR. The weekly job runs on a schedule so it cannot be
+#      silenced by a single merge.
+#
+# Pairs with the build.rs compile-time guard
+# (`refusing to build for production with sandbox feature`) and
+# the CI-time prod-bundle-check.yml grep. Defence in depth, third layer.
+#
+# SHA-pinned actions per the org CI/CD standard
+# (`Architecture/cicd.std.md`).
+# Wrangler is npm-installed so its version is pinned via package-lock
+# resolution; bumping is a Dependabot concern.
+
+name: Weekly prod WASM bundle leak check
+
+on:
+  schedule:
+    # Mondays at 02:30 UTC. Offset 30 min from security-audit.yml so the
+    # two scheduled runs do not contend for runner minutes.
+    - cron: '30 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write  # actions/github-script needs this to file a leak report
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  WRANGLER_VERSION: '4.92.0'
+
+jobs:
+  weekly-bundle-grep:
+    name: Pull deployed prod WASM and grep for sandbox leaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler
+        run: npm install -g wrangler@${{ env.WRANGLER_VERSION }} --ignore-scripts
+
+      - name: Install wabt (wasm-objdump)
+        # wabt provides `wasm-objdump`. The `-s` flag dumps the contents
+        # of every section as raw bytes; piping into `grep -E` against
+        # the same patterns prod-bundle-check.yml uses gives us a
+        # production-side regression sensor for the sandbox-feature
+        # gating.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wabt binutils
+          wasm-objdump --version
+
+      - name: Identify deployed production worker
+        id: deployment
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          # `wrangler deployments list` is read-only and returns the
+          # most recent deploys for the worker named by wrangler.toml's
+          # default (production) environment. Take the top entry's
+          # version-id and pass it to the download step.
+          set -euo pipefail
+          DEPLOYS=$(wrangler deployments list 2>&1) || {
+            echo "::error::wrangler deployments list failed"
+            echo "$DEPLOYS"
+            exit 1
+          }
+          echo "$DEPLOYS"
+          # Match the first hex version ID (UUIDv4 shape). Wrangler
+          # <=4.91 prints `Version ID: <uuid>`. Wrangler >=4.92 prints
+          # `(100%) <uuid>`. Try both patterns so this survives future
+          # format changes in either direction.
+          VERSION_ID=$(echo "$DEPLOYS" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -n1)
+          if [ -z "$VERSION_ID" ]; then
+            echo "::error::could not extract Version ID from wrangler output"
+            exit 2
+          fi
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+          echo "Latest production version: $VERSION_ID"
+
+      - name: Download deployed bundle
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VERSION_ID: ${{ steps.deployment.outputs.version_id }}
+        run: |
+          # `wrangler deployment download` writes the bundle (wasm + JS
+          # shim + metadata) into the working directory. We point it at
+          # `deployed/` so the artefact is segregated from any local
+          # build output.
+          set -euo pipefail
+          mkdir -p deployed
+          cd deployed
+          wrangler deployment download "$VERSION_ID"
+          echo "Downloaded deployed artefact:"
+          find . -maxdepth 3 -type f
+
+      - name: Locate deployed wasm
+        id: locate
+        run: |
+          set -euo pipefail
+          WASM=$(find deployed -name '*.wasm' -type f | head -n1)
+          if [ -z "$WASM" ]; then
+            echo "::error::no .wasm file found in downloaded deployment"
+            find deployed -maxdepth 4 -type f
+            exit 2
+          fi
+          echo "wasm=$WASM" >> "$GITHUB_OUTPUT"
+          echo "Deployed wasm: $WASM ($(stat -c%s "$WASM") bytes)"
+
+      - name: Grep wasm-objdump output for sandbox literals
+        id: grep
+        env:
+          WASM: ${{ steps.locate.outputs.wasm }}
+        run: |
+          # `wasm-objdump -s` dumps every section's raw bytes; the data
+          # section contains the same string literals the build-time
+          # check looks at. Three patterns mirror prod-bundle-check.yml:
+          #
+          #   docs-sbx-                  : sandbox docs-issuer client prefix
+          #   mwallet-sbx-               : sandbox mobile wallet prefix
+          #   register-test-issuer-client: feature-gated route literal
+          #
+          # `set +e` because grep returns 1 on no-match; we want to
+          # treat that as success.
+          set +e
+          wasm-objdump -s "$WASM" > /tmp/objdump.txt 2>&1
+          OBJDUMP_RC=$?
+          set -e
+          if [ "$OBJDUMP_RC" -ne 0 ]; then
+            echo "::error::wasm-objdump exited $OBJDUMP_RC"
+            head -n 50 /tmp/objdump.txt
+            exit "$OBJDUMP_RC"
+          fi
+
+          set +e
+          HITS=$(grep -E 'docs-sbx-|mwallet-sbx-|register-test-issuer-client' /tmp/objdump.txt)
+          GREP_RC=$?
+          set -e
+
+          if [ "$GREP_RC" -eq 0 ]; then
+            echo "::error::sandbox-only literal found in deployed production wasm"
+            echo "$HITS" | head -n 50
+            {
+              echo "leaked=true"
+              # Truncate to keep step output readable; the issue body
+              # below pulls the same buffer.
+              echo "hits<<EOF"
+              echo "$HITS" | head -n 50
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo 'OK: no sandbox literals in deployed provii-verifier production wasm'
+          echo "leaked=false" >> "$GITHUB_OUTPUT"
+
+      - name: File leak report issue
+        if: failure() && steps.grep.outputs.leaked == 'true'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          LEAK_VERSION_ID: ${{ steps.deployment.outputs.version_id }}
+          LEAK_HITS: ${{ steps.grep.outputs.hits }}
+        with:
+          script: |
+            const versionId = process.env.LEAK_VERSION_ID;
+            const hits = process.env.LEAK_HITS;
+            const title = `[Security] Sandbox literals found in DEPLOYED provii-verifier production wasm`;
+            const body = `## Weekly prod WASM bundle leak check FAILED
+
+            **Workflow:** [run #${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+            **Deployed Version ID:** \`${versionId}\`
+            **Detected:** ${new Date().toISOString()}
+
+            The provii-verifier production worker currently deployed at
+            Cloudflare contains string literals that should only ship
+            in the sandbox build. This bypasses both the build.rs
+            compile-time guard and the CI-time
+            prod-bundle-check.yml grep, which means
+            either:
+
+              1. The bundle was deployed out-of-band via a developer
+                 laptop without going through deploy.yml.
+              2. prod-bundle-check.yml has been disabled or its rules
+                 weakened.
+              3. The sandbox feature was somehow linked into the
+                 production worker-build invocation.
+
+            ### Matched literals
+            \`\`\`
+            ${hits}
+            \`\`\`
+
+            ### Triage steps
+            1. Roll back to the previous deployment via
+               \`wrangler rollback\` once a known-clean Version ID is
+               identified from \`wrangler deployments list\`.
+            2. Re-run deploy.yml from \`main\` so the next deploy is
+               regenerated by CI rather than by a laptop.
+            3. Audit the prod-bundle-check.yml run history for the
+               last clean week.
+
+            /cc @provii/security-team
+            `;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,prod-leak',
+            });
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['security', 'prod-leak', 'priority:critical'],
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: `Re-detected on ${new Date().toISOString()} for version \`${versionId}\`. See workflow [run #${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`,
+              });
+            }

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+# Native-target rate limiting tests for provii-verifier.
+#
+# The root `provii-verifier` package targets wasm32-unknown-unknown via
+# .cargo/config.toml, making all #[test] blocks dead code on native. This
+# subcrate extracts the portable rate limiting logic (parse_tier_limits,
+# KV counter, tier lookup, in-memory counter cache) and exercises it with
+# a mock KV backend on a native target.
+#
+# Run: cargo test -p provii-verifier-rate-limit-tests
+
+[package]
+name = "provii-verifier-rate-limit-tests"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1.0"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+serial_test = "3.1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "allow"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "allow"
+arithmetic_side_effects = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"

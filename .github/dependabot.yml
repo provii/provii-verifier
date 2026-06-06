@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Cargo is intentionally not managed by Dependabot. This workspace depends on
+  # provii-crypto and provii-audit through relative path dependencies to sibling
+  # repositories that the build clones at a pinned tag. Dependabot cannot reach
+  # those manifests (path_dependencies_not_reachable) and aborts the entire
+  # cargo update, so it manages GitHub Actions only. Cargo advisories are
+  # covered by the cargo-deny / cargo-audit steps in CI.

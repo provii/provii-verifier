@@ -1,0 +1,17 @@
+# Exact toolchain pin for reproducible builds.
+#
+# A floating `stable` makes two builds weeks apart use different rustc/LLVM and
+# produce different wasm bytes, which defeats reproducibility. Pin the EXACT
+# version, and keep it IDENTICAL across provii-crypto, provii-issuer, and
+# provii-verifier so the wasm is reproducible across the workspace.
+#
+# ACTION: set `channel` to the exact stable you have validated (run
+# `rustc --version` on your chosen toolchain and use that number). 1.88.0 is the
+# minimum the dependency closure allows: the project's `icu` needs 1.86, and
+# `cargo install worker-build` pulls `time 0.3.47` which needs 1.88 (found in CI).
+# Bump as you upgrade, in lockstep across all three repos.
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

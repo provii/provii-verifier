@@ -1,0 +1,28 @@
+# Hermetic, reproducible build image for the Provii verifier Worker wasm.
+#
+# Lets a third party rebuild a tagged commit in the SAME environment we use, so
+# the resulting build/index_bg.wasm matches our published deployed hash. See
+# VERIFY.md for the end-to-end verification steps.
+#
+# ACTION before relying on this:
+#   1. Pin the base image by DIGEST, not just the tag, for true reproducibility:
+#        docker pull rust:1.88.0-bookworm
+#        docker inspect --format='{{index .RepoDigests 0}}' rust:1.88.0-bookworm
+#      then replace the FROM line with rust:1.88.0-bookworm@sha256:<digest>.
+#   2. Install the exact pinned Binaryen (wasm-opt) release used by CI and set
+#      EXPECTED_WASM_OPT_VERSION in scripts/reproducible-build.sh to match.
+#   3. Keep the rust tag identical to rust-toolchain.toml.
+FROM rust:1.88.0-bookworm
+
+RUN rustup target add wasm32-unknown-unknown
+
+# Pinned Binaryen / wasm-opt. Replace with your validated release download.
+# ENV BINARYEN_VERSION=...
+# RUN curl -fsSL <pinned-binaryen-release-url> | tar -xz -C /opt && \
+#     ln -s /opt/binaryen-*/bin/wasm-opt /usr/local/bin/wasm-opt
+
+WORKDIR /src
+# The build needs sibling path-deps; mount or copy them in at build time:
+#   ../provii-crypto and ../provii-audit must resolve relative to /src.
+COPY . .
+ENTRYPOINT ["bash", "./scripts/reproducible-build.sh"]

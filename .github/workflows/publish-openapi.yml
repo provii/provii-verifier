@@ -1,0 +1,242 @@
+# Publish OpenAPI Spec, provii-verifier
+#
+# On merge to `main`, builds the public OpenAPI JSON, signs it with Sigstore
+# (keyless cosign producing a Sigstore bundle), attests build provenance via
+# SLSA, and uploads the spec plus both sidecars to R2 bucket
+# `provii-api-specs` via Cloudflare-native `wrangler r2 object put --remote`
+# using `CLOUDFLARE_API_TOKEN`. The S3-compatible rclone path was removed
+# because the bucket-scoped S3 access keys could not authenticate (HTTP 401
+# Unauthorized on every PUT). wrangler uses the same first-party token
+# already used by the deploy workflow.
+#
+# Layout in R2 (matches the lifecycle rule prefixes set in
+# `/tmp/wave9/r2-lifecycle.json` at Wave-9 provisioning):
+#   provii-verifier/sha/<sha>/latest.json                 (retained 90 days)
+#   provii-verifier/sha/<sha>/latest.json.sig             (cosign Sigstore bundle)
+#   provii-verifier/sha/<sha>/latest.json.intoto.jsonl    (SLSA in-toto JSONL)
+#   provii-verifier/latest.json                           (retained forever)
+#   provii-verifier/latest.json.sig                       (retained forever)
+#   provii-verifier/latest.json.intoto.jsonl              (retained forever)
+#
+# The provii-docs prebuild consumes the
+# top-level `latest.json` triplet. It uses `@sigstore/verify` to verify the
+# bundle against the fetched bytes, then walks the in-toto statement to
+# confirm the subject's SHA-256 digest matches the body and that the
+# predicate type begins with `https://slsa.dev/provenance/`.
+#
+# Format notes:
+#   * `latest.json.sig` is a Sigstore bundle (mediaType
+#     `application/vnd.dev.sigstore.bundle.v0.3+json`) produced by
+#     `cosign sign-blob --new-bundle-format`. The bundle embeds the X.509
+#     certificate, signature, and Rekor inclusion proof, so the consumer
+#     does not need a separate `.pem` file.
+#   * `latest.json.intoto.jsonl` is the in-toto Statement (compact JSON,
+#     one statement per line) extracted from the DSSE envelope inside the
+#     `actions/attest-build-provenance` Sigstore bundle. The consumer parses
+#     the first non-empty line and validates `subject[].digest.sha256` and
+#     `predicateType`.
+
+name: Publish OpenAPI Spec
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openapi/openapi.json'
+      - '.github/workflows/publish-openapi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write       # cosign keyless + SLSA attestation
+  attestations: write   # actions/attest-build-provenance
+
+concurrency:
+  group: publish-openapi-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WRANGLER_VERSION: '4.92.0'
+
+jobs:
+  publish:
+    name: Build, sign, attest, upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SERVICE: provii-verifier
+      R2_BUCKET: provii-api-specs
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build spec
+        # WAVE-9 BOOTSTRAP: copy the committed spec into the build directory
+        # under the public-facing filename `latest.json`. We sign and attest
+        # the exact bytes we will publish so the consumer's SHA-256 over the
+        # fetched body matches the in-toto subject digest. This replaces
+        # the cp with a schemars-backed generator.
+        run: |
+          set -euo pipefail
+          if [ ! -f openapi/openapi.json ]; then
+            echo "::error::openapi/openapi.json missing; run the generator or restore the committed file"
+            exit 1
+          fi
+          mkdir -p build
+          cp openapi/openapi.json build/latest.json
+          python3 -c "import json,sys; json.load(open('build/latest.json'))" || { echo "::error::spec is not valid JSON"; exit 1; }
+          wc -c build/latest.json
+
+      - name: Compute SHA-256 of spec
+        id: digest
+        run: |
+          set -euo pipefail
+          DIGEST=$(sha256sum build/latest.json | awk '{print $1}')
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
+          echo "Spec digest: ${DIGEST}"
+
+      - name: Install Sigstore cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin to a release that supports `--new-bundle-format`. Older
+          # cosign versions emit a legacy detached-signature blob that
+          # `@sigstore/verify` cannot consume.
+          cosign-release: 'v2.5.3'
+
+      - name: Sign spec with cosign (keyless, Sigstore bundle)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --new-bundle-format \
+            --bundle build/latest.json.sig \
+            build/latest.json
+          # Sanity check: the file must be valid JSON and carry a Sigstore
+          # bundle mediaType so the consumer parser does not reject it.
+          python3 -c "import json,sys; b=json.load(open('build/latest.json.sig')); assert b.get('mediaType','').startswith('application/vnd.dev.sigstore.bundle'), b.get('mediaType')"
+
+      - name: Attest build provenance (SLSA)
+        id: attest
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: build/latest.json
+
+      - name: Extract in-toto SLSA statement to JSONL
+        env:
+          ATTEST_BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          EXPECTED_DIGEST: ${{ steps.digest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          BUNDLE_PATH="${ATTEST_BUNDLE_PATH}"
+          if [ -z "${BUNDLE_PATH}" ] || [ ! -f "${BUNDLE_PATH}" ]; then
+            echo "::error::attest-build-provenance bundle-path output is empty or missing"
+            exit 1
+          fi
+          # The bundle is a Sigstore protobuf-derived JSON object whose
+          # dsseEnvelope.payload is base64-encoded JSON containing the
+          # in-toto Statement. Decode it, re-emit as compact JSON on a
+          # single line, and confirm the subject digest matches the spec
+          # we signed before writing the artefact.
+          jq -r '.dsseEnvelope.payload' "${BUNDLE_PATH}" \
+            | base64 -d \
+            | jq -c '.' \
+            > build/latest.json.intoto.jsonl
+          STATEMENT_DIGEST=$(jq -r '.subject[0].digest.sha256' build/latest.json.intoto.jsonl)
+          if [ "${STATEMENT_DIGEST}" != "${EXPECTED_DIGEST}" ]; then
+            echo "::error::in-toto subject digest ${STATEMENT_DIGEST} does not match spec digest ${EXPECTED_DIGEST}"
+            exit 1
+          fi
+          PREDICATE_TYPE=$(jq -r '.predicateType' build/latest.json.intoto.jsonl)
+          case "${PREDICATE_TYPE}" in
+            https://slsa.dev/provenance/*) ;;
+            *)
+              echo "::error::unexpected predicateType ${PREDICATE_TYPE}"
+              exit 1
+              ;;
+          esac
+          wc -c build/latest.json.intoto.jsonl
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v4
+        with:
+          node-version: '22'
+
+      - name: Install Wrangler
+        run: npm install -g wrangler@${{ env.WRANGLER_VERSION }} --ignore-scripts
+
+      - name: Upload per-SHA spec + sidecars to R2 (wrangler)
+        # Use `wrangler r2 object put --remote` with `CLOUDFLARE_API_TOKEN`.
+        # `--remote` is mandatory: without it wrangler writes to the local
+        # miniflare store and silently no-ops against production R2. The
+        # first-party token (already used by the deploy workflow) avoids
+        # the bucket-scoped S3 access-key auth path that previously
+        # returned HTTP 401 on every PUT.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SHA_PREFIX="${SERVICE}/sha/${COMMIT_SHA}"
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SHA_PREFIX}/latest.json" \
+            --remote \
+            --file=build/latest.json \
+            --content-type=application/json
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SHA_PREFIX}/latest.json.sig" \
+            --remote \
+            --file=build/latest.json.sig \
+            --content-type=application/vnd.dev.sigstore.bundle+json
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SHA_PREFIX}/latest.json.intoto.jsonl" \
+            --remote \
+            --file=build/latest.json.intoto.jsonl \
+            --content-type=application/vnd.in-toto+json
+
+      - name: Promote to top-level latest.* via wrangler (overwrites)
+        # The docs prebuild fetches all three at the top level. We update
+        # them as a triplet after the per-SHA copies above so that a
+        # partial failure leaves the historical record intact.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SERVICE}/latest.json" \
+            --remote \
+            --file=build/latest.json \
+            --content-type=application/json
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SERVICE}/latest.json.sig" \
+            --remote \
+            --file=build/latest.json.sig \
+            --content-type=application/vnd.dev.sigstore.bundle+json
+          wrangler r2 object put \
+            "${R2_BUCKET}/${SERVICE}/latest.json.intoto.jsonl" \
+            --remote \
+            --file=build/latest.json.intoto.jsonl \
+            --content-type=application/vnd.in-toto+json
+
+      - name: Upload CI artefacts (debug)
+        # `if: always()` so a failure in the R2 upload steps still surfaces
+        # the signed spec triplet as a downloadable workflow artefact.
+        # Without this an R2 token misconfiguration discards the cosign
+        # bundle and in-toto JSONL produced earlier in the job, forcing a
+        # full rebuild to recover them.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openapi-${{ github.sha }}
+          path: build/
+          retention-days: 14

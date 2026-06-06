@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (c) 2024-2026 Maelstrom AI Pty Ltd ATF Maelstrom AI Holding Trust
+#
+# Native-target CORS tests for provii-verifier.
+#
+# The root `provii-verifier` package targets wasm32-unknown-unknown via
+# .cargo/config.toml, making all #[test] blocks dead code. This subcrate
+# copies the AllowedOrigins struct and exercises it on a native target so the
+# CORS logic actually runs in CI.
+#
+# Run: cargo test -p provii-verifier-cors-tests
+
+[package]
+name = "provii-verifier-cors-tests"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+url = "2.5"
+
+[dev-dependencies]
+proptest = "1.5"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "allow"             # Tests use .expect() for fixture setup.
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "allow"        # Test fixtures use indexing freely.
+arithmetic_side_effects = "allow"

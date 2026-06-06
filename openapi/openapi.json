@@ -1,0 +1,3047 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "Provii Verifier API",
+        "version": "1.0.0",
+        "description": "Zero-knowledge proof based age verification service. This API enables privacy-preserving age verification without revealing personal information.",
+        "contact": {
+            "name": "Provii Support",
+            "email": "support@provii.app",
+            "url": "https://provii.app"
+        }
+    },
+    "servers": [
+        {
+            "url": "https://verify.provii.app",
+            "description": "Production server"
+        }
+    ],
+    "tags": [
+        {
+            "name": "Challenge",
+            "description": "Challenge creation, polling, and redemption for age verification"
+        },
+        {
+            "name": "Verification",
+            "description": "Zero-knowledge proof submission and verification"
+        },
+        {
+            "name": "Operations",
+            "description": "Health checks, metrics, and monitoring"
+        },
+        {
+            "name": "Meta",
+            "description": "API documentation endpoints"
+        },
+        {
+            "name": "Sandbox",
+            "description": "Sandbox-only endpoints for testing"
+        },
+        {
+            "name": "System",
+            "description": "System health and monitoring"
+        },
+        {
+            "name": "Hosted",
+            "description": "Browser-facing hosted verification flow endpoints for the provii-agegate SDK"
+        }
+    ],
+    "paths": {
+        "/v1/challenge": {
+            "post": {
+                "summary": "Create age verification challenge",
+                "description": "Creates a new challenge for age verification using PKCE flow. The origin must be pre-approved.",
+                "operationId": "createVerificationChallenge",
+                "tags": [
+                    "Challenge"
+                ],
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "parameters": [
+                    {
+                        "name": "Origin",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Origin of the request. Must be in the approved origins list.",
+                        "example": "https://example.com"
+                    },
+                    {
+                        "name": "X-API-Key",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "API key issued to the relying party.",
+                        "example": "pk_live_XXXXXXXXXXXXXXXX"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "title": "CreateChallengeRequest",
+                                "description": "Request body for `POST /v1/challenge`.\n\nSECURITY: The `authorizer` field carries the HMAC-SHA256 signature, nonce, and\ntimestamp that authenticate the caller. The `code_challenge` binds the session\nto the PKCE flow so proof submission requires the matching code verifier.",
+                                "type": "object",
+                                "properties": {
+                                    "code_challenge": {
+                                        "description": "PKCE code challenge encoded as base64url (exactly 32 bytes).",
+                                        "$ref": "#/$defs/B64Url32"
+                                    },
+                                    "method": {
+                                        "description": "PKCE method. Only S256 is supported.",
+                                        "$ref": "#/$defs/PkceMethod",
+                                        "default": "S256"
+                                    },
+                                    "verifying_key_id": {
+                                        "description": "Optional verifying key identifier, validated against the origin policy.",
+                                        "anyOf": [
+                                            {
+                                                "$ref": "#/$defs/VkId"
+                                            },
+                                            {
+                                                "type": "null"
+                                            }
+                                        ],
+                                        "default": null
+                                    },
+                                    "expires_in": {
+                                        "description": "Requested challenge lifetime in seconds (clamped to policy and system limits).",
+                                        "$ref": "#/$defs/ExpiresIn",
+                                        "default": 300
+                                    },
+                                    "authorizer": {
+                                        "description": "HMAC authentication envelope (key_id, timestamp, hmac, nonce).",
+                                        "$ref": "#/$defs/Authorizer"
+                                    }
+                                },
+                                "additionalProperties": false,
+                                "required": [
+                                    "code_challenge",
+                                    "authorizer"
+                                ],
+                                "$defs": {
+                                    "B64Url32": {
+                                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                                        "type": "string"
+                                    },
+                                    "PkceMethod": {
+                                        "description": "Supported PKCE code challenge methods.",
+                                        "type": "string",
+                                        "enum": [
+                                            "S256"
+                                        ]
+                                    },
+                                    "VkId": {
+                                        "description": "Non-zero verifying key identifier.",
+                                        "type": "integer",
+                                        "format": "uint32",
+                                        "minimum": 0
+                                    },
+                                    "ExpiresIn": {
+                                        "description": "TTL for a challenge, clamped to `[MIN, MAX]` on construction.",
+                                        "type": "integer",
+                                        "format": "uint64",
+                                        "minimum": 0
+                                    },
+                                    "Authorizer": {
+                                        "description": "Shared HMAC-based authorizer used by relying parties when calling the API.\n\nSECURITY: `hmac` and `nonce` are secret authentication material. The `Debug`\nimpl redacts them to prevent accidental logging (ASVS V11.7.2).\n`Zeroize` + `ZeroizeOnDrop` ensure they are cleared from memory on drop.",
+                                        "type": "object",
+                                        "properties": {
+                                            "keyId": {
+                                                "description": "Identifier of the client credential used to authenticate the request.",
+                                                "type": "string"
+                                            },
+                                            "timestamp": {
+                                                "description": "Unix timestamp (seconds) included in the canonical signing payload.",
+                                                "type": "integer",
+                                                "format": "uint64",
+                                                "minimum": 0
+                                            },
+                                            "hmac": {
+                                                "description": "Hex-encoded HMAC (SHA-256) over the canonical message.",
+                                                "type": "string"
+                                            },
+                                            "nonce": {
+                                                "description": "SECURITY: Cryptographic nonce for replay protection (64 hex chars / 256 bits).\nRequired for nonce-based replay attack prevention (ASVS V6.1.3).",
+                                                "type": "string"
+                                            }
+                                        },
+                                        "additionalProperties": false,
+                                        "required": [
+                                            "keyId",
+                                            "timestamp",
+                                            "hmac",
+                                            "nonce"
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Challenge created successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "ChallengeResponse",
+                                    "description": "Successful response from `POST /v1/challenge`.\n\nContains everything the client needs to display a QR code (or short code)\nand later submit a zero knowledge proof against `rp_challenge`.",
+                                    "type": "object",
+                                    "properties": {
+                                        "challenge_id": {
+                                            "description": "Unique challenge identifier (UUIDv4).",
+                                            "$ref": "#/$defs/UuidV4"
+                                        },
+                                        "short_code": {
+                                            "description": "12-digit numeric short code for accessibility (displayed as XXXX XXXX XXXX).",
+                                            "type": "string"
+                                        },
+                                        "short_code_formatted": {
+                                            "description": "Human-readable formatted short code: \"XXXX XXXX XXXX\".",
+                                            "type": "string"
+                                        },
+                                        "rp_challenge": {
+                                            "description": "Base64url-encoded relying-party challenge (32 bytes).",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "cutoff_days": {
+                                            "description": "Age cutoff in epoch days used by the ZK circuit.",
+                                            "$ref": "#/$defs/CutoffDays"
+                                        },
+                                        "verifying_key_id": {
+                                            "description": "Verifying key identifier selected for this challenge.",
+                                            "$ref": "#/$defs/VkId"
+                                        },
+                                        "submit_secret": {
+                                            "description": "Base64url-encoded submit secret (32 bytes). Required for proof submission.",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "expires_at": {
+                                            "description": "Unix timestamp when this challenge expires.",
+                                            "type": "integer",
+                                            "format": "uint64",
+                                            "minimum": 0
+                                        },
+                                        "proof_direction": {
+                                            "description": "Direction of the age proof: over_age or under_age.",
+                                            "type": "string"
+                                        },
+                                        "status_url": {
+                                            "description": "URL to poll for challenge status updates.",
+                                            "type": "string"
+                                        },
+                                        "verify_url": {
+                                            "description": "URL to submit the zero knowledge proof.",
+                                            "type": "string"
+                                        }
+                                    },
+                                    "additionalProperties": false,
+                                    "required": [
+                                        "challenge_id",
+                                        "short_code",
+                                        "short_code_formatted",
+                                        "rp_challenge",
+                                        "cutoff_days",
+                                        "verifying_key_id",
+                                        "submit_secret",
+                                        "expires_at",
+                                        "proof_direction",
+                                        "status_url",
+                                        "verify_url"
+                                    ],
+                                    "$defs": {
+                                        "UuidV4": {
+                                            "description": "UUID wrapper constrained to version 4 values.",
+                                            "type": "string",
+                                            "format": "uuid"
+                                        },
+                                        "B64Url32": {
+                                            "description": "Base64url-encoded wrapper around a 32-byte array.",
+                                            "type": "string"
+                                        },
+                                        "CutoffDays": {
+                                            "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                                            "type": "integer",
+                                            "format": "int32"
+                                        },
+                                        "VkId": {
+                                            "description": "Non-zero verifying key identifier.",
+                                            "type": "integer",
+                                            "format": "uint32",
+                                            "minimum": 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Access denied",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limit exceeded",
+                        "headers": {
+                            "Retry-After": {
+                                "schema": {
+                                    "type": "integer"
+                                },
+                                "description": "Seconds until the rate limit resets"
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/challenge/{session_id}": {
+            "get": {
+                "summary": "Poll challenge status",
+                "description": "Check the current status of a challenge",
+                "operationId": "pollChallengeStatus",
+                "tags": [
+                    "Challenge"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Challenge session ID"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Challenge status",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "ChallengeStatus",
+                                    "type": "object",
+                                    "properties": {
+                                        "state": {
+                                            "type": "string"
+                                        },
+                                        "status": {
+                                            "type": "string"
+                                        },
+                                        "verified": {
+                                            "type": "boolean"
+                                        },
+                                        "proof_verified": {
+                                            "type": "boolean"
+                                        }
+                                    },
+                                    "required": [
+                                        "state",
+                                        "status",
+                                        "verified",
+                                        "proof_verified"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Gone",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/challenge/{session_id}/redeem": {
+            "post": {
+                "summary": "Redeem verified challenge",
+                "description": "Complete verification by providing PKCE code_verifier",
+                "operationId": "redeemVerificationChallenge",
+                "tags": [
+                    "Challenge"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Challenge session ID"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "title": "RedeemRequest",
+                                "description": "Request body for `POST /v1/challenge/:session_id/redeem`.",
+                                "type": "object",
+                                "properties": {
+                                    "code_verifier": {
+                                        "description": "PKCE code verifier (43-128 unreserved characters, RFC 7636 appendix B).",
+                                        "$ref": "#/$defs/PkceCodeVerifier"
+                                    }
+                                },
+                                "additionalProperties": false,
+                                "required": [
+                                    "code_verifier"
+                                ],
+                                "$defs": {
+                                    "PkceCodeVerifier": {
+                                        "description": "PKCE `code_verifier` value constrained to the RFC 7636 character set.\n\nSECURITY: The code verifier is a high-entropy secret used exactly once.\nIt is zeroised on drop and redacted in Debug output.",
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Challenge redeemed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "RedeemResponse",
+                                    "description": "JSON response returned from `POST /v1/challenge/:session_id/redeem`.",
+                                    "type": "object",
+                                    "properties": {
+                                        "result": {
+                                            "description": "`\"OK\"` on success.",
+                                            "type": "string"
+                                        },
+                                        "verified": {
+                                            "description": "`true` when the challenge has been successfully redeemed.",
+                                            "type": "boolean"
+                                        }
+                                    },
+                                    "required": [
+                                        "result",
+                                        "verified"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Gone",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/verify": {
+            "post": {
+                "summary": "Submit age proof",
+                "description": "Submit zero-knowledge proof for verification",
+                "operationId": "submitVerification",
+                "tags": [
+                    "Verification"
+                ],
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                "title": "SubmitProofRequest",
+                                "description": "Top-level request body for `POST /v1/verify`.\n\nAll fields are required. Unknown fields are rejected at deserialisation.",
+                                "type": "object",
+                                "properties": {
+                                    "challenge_id": {
+                                        "description": "Challenge UUID returned from `POST /v1/challenge`.",
+                                        "$ref": "#/$defs/UuidV4"
+                                    },
+                                    "submit_secret": {
+                                        "description": "Anti-abuse secret (base64url, 32 bytes). Compared in constant time.",
+                                        "$ref": "#/$defs/B64Url32"
+                                    },
+                                    "proof": {
+                                        "description": "The Groth16 age proof and its public inputs.",
+                                        "$ref": "#/$defs/AgeProofJson"
+                                    }
+                                },
+                                "additionalProperties": false,
+                                "required": [
+                                    "challenge_id",
+                                    "submit_secret",
+                                    "proof"
+                                ],
+                                "$defs": {
+                                    "UuidV4": {
+                                        "description": "UUID wrapper constrained to version 4 values.",
+                                        "type": "string",
+                                        "format": "uuid"
+                                    },
+                                    "B64Url32": {
+                                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                                        "type": "string"
+                                    },
+                                    "AgeProofJson": {
+                                        "description": "Groth16 age proof with its associated public inputs.",
+                                        "type": "object",
+                                        "properties": {
+                                            "verifying_key_id": {
+                                                "description": "Identifier selecting the verifying key registered for this origin.",
+                                                "$ref": "#/$defs/VkId"
+                                            },
+                                            "public": {
+                                                "description": "Public inputs fed into the Groth16 verifier.",
+                                                "$ref": "#/$defs/PublicInputsJson"
+                                            },
+                                            "proof": {
+                                                "description": "Groth16 proof bytes (base64url, exactly 192 bytes decoded).",
+                                                "$ref": "#/$defs/B64Url192"
+                                            }
+                                        },
+                                        "additionalProperties": false,
+                                        "required": [
+                                            "verifying_key_id",
+                                            "public",
+                                            "proof"
+                                        ]
+                                    },
+                                    "VkId": {
+                                        "description": "Non-zero verifying key identifier.",
+                                        "type": "integer",
+                                        "format": "uint32",
+                                        "minimum": 0
+                                    },
+                                    "PublicInputsJson": {
+                                        "description": "Public inputs that the SNARK circuit constrains.\n\nEvery field is re-validated against the stored challenge record before the\nproof is passed to the Groth16 verifier.",
+                                        "type": "object",
+                                        "properties": {
+                                            "cutoff_days": {
+                                                "description": "Minimum age threshold in days (e.g. 6570 for 18 years).",
+                                                "$ref": "#/$defs/CutoffDays"
+                                            },
+                                            "rp_challenge": {
+                                                "description": "Relying-party challenge (base64url, 32 bytes). Blake2s-256 hashed before circuit input.",
+                                                "$ref": "#/$defs/B64Url32"
+                                            },
+                                            "issuer": {
+                                                "description": "Issuer verifying key.",
+                                                "$ref": "#/$defs/IssuerKeyJson"
+                                            },
+                                            "cred_nullifier": {
+                                                "description": "Credential nullifier (base64url, 32 bytes). Checked against the ban list.",
+                                                "$ref": "#/$defs/B64Url32"
+                                            }
+                                        },
+                                        "additionalProperties": false,
+                                        "required": [
+                                            "cutoff_days",
+                                            "rp_challenge",
+                                            "issuer",
+                                            "cred_nullifier"
+                                        ]
+                                    },
+                                    "CutoffDays": {
+                                        "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                                        "type": "integer",
+                                        "format": "int32"
+                                    },
+                                    "IssuerKeyJson": {
+                                        "description": "Issuer verifying key transmitted as raw bytes (not a hash).",
+                                        "type": "object",
+                                        "properties": {
+                                            "value": {
+                                                "description": "Raw RedJubjub verifying key bytes (base64url-encoded, 32 bytes).\nFed directly as public inputs 4 and 5 of the Groth16 circuit.",
+                                                "$ref": "#/$defs/B64Url32"
+                                            }
+                                        },
+                                        "additionalProperties": false,
+                                        "required": [
+                                            "value"
+                                        ]
+                                    },
+                                    "B64Url192": {
+                                        "description": "Base64url-encoded wrapper around a 192-byte array.",
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Proof verified",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "VerifyResponse",
+                                    "description": "JSON response returned from `POST /v1/verify`.",
+                                    "type": "object",
+                                    "properties": {
+                                        "result": {
+                                            "description": "`\"OK\"` on success, or an error code such as `\"INVALID_PROOF\"`.",
+                                            "type": "string"
+                                        },
+                                        "state": {
+                                            "description": "Current challenge state, e.g. `\"proof_ok_waiting_for_redeem\"`.",
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "result",
+                                        "state"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Access denied",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Gone",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "summary": "Health check",
+                "operationId": "health",
+                "tags": [
+                    "System"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Service is healthy",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": {
+                                            "type": "string",
+                                            "example": "healthy",
+                                            "enum": [
+                                                "healthy",
+                                                "degraded",
+                                                "unhealthy"
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "integer",
+                                            "format": "int64"
+                                        },
+                                        "version": {
+                                            "type": "string",
+                                            "example": "v1"
+                                        }
+                                    },
+                                    "required": [
+                                        "status",
+                                        "timestamp",
+                                        "version"
+                                    ]
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Service unhealthy",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "status": {
+                                            "type": "string",
+                                            "example": "unhealthy",
+                                            "enum": [
+                                                "healthy",
+                                                "degraded",
+                                                "unhealthy"
+                                            ]
+                                        },
+                                        "timestamp": {
+                                            "type": "integer",
+                                            "format": "int64"
+                                        },
+                                        "version": {
+                                            "type": "string",
+                                            "example": "v1"
+                                        }
+                                    },
+                                    "required": [
+                                        "status",
+                                        "timestamp",
+                                        "version"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/health/detailed": {
+            "get": {
+                "summary": "Detailed health check",
+                "description": "Returns detailed health status including subsystem checks for challenge store, nonce store, JWKS cache, rate limiter, and ban store",
+                "operationId": "healthDetailed",
+                "tags": [
+                    "Operations"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Detailed health status",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HealthCheckResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "Service unhealthy",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HealthCheckResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/metrics": {
+            "get": {
+                "summary": "Prometheus metrics",
+                "description": "Returns metrics in Prometheus text exposition format",
+                "operationId": "metrics",
+                "tags": [
+                    "Operations"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Metrics in Prometheus format",
+                        "content": {
+                            "text/plain": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/csp-report": {
+            "post": {
+                "summary": "Receive CSP violation report",
+                "description": "Endpoint for browsers to submit Content Security Policy violation reports. Returns 204 with no body.",
+                "operationId": "cspReport",
+                "tags": [
+                    "Meta"
+                ],
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/csp-report": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CspReport"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "204": {
+                        "description": "Report received"
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/openapi.json": {
+            "get": {
+                "summary": "OpenAPI specification",
+                "description": "Returns this OpenAPI specification document",
+                "operationId": "openapiSpec",
+                "tags": [
+                    "Meta"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "OpenAPI 3.1.0 specification",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/docs": {
+            "get": {
+                "summary": "API documentation",
+                "description": "Interactive API documentation rendered from the OpenAPI specification",
+                "operationId": "apiDocs",
+                "tags": [
+                    "Meta"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "HTML documentation page",
+                        "content": {
+                            "text/html": {
+                                "schema": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/challenge/{session_id}/details": {
+            "get": {
+                "summary": "Get challenge details",
+                "description": "Returns full challenge details including short code, deep link data, and expiry. Used by the wallet app to display challenge information.",
+                "operationId": "challengeDetails",
+                "tags": [
+                    "Challenge"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Challenge session ID"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Challenge details",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "ChallengeDetailsResponse",
+                                    "description": "Full challenge details returned by `GET /v1/challenge/:id`.\n\nIncludes `submit_secret` because access requires the 122-bit UUID capability\n(obtained via QR deep link), not the lower-entropy short code.",
+                                    "type": "object",
+                                    "properties": {
+                                        "challenge_id": {
+                                            "description": "Unique challenge identifier (UUIDv4).",
+                                            "$ref": "#/$defs/UuidV4"
+                                        },
+                                        "short_code": {
+                                            "description": "12-digit numeric short code for accessibility (displayed as XXXX XXXX XXXX).",
+                                            "type": "string"
+                                        },
+                                        "short_code_formatted": {
+                                            "description": "Human-readable formatted short code: \"XXXX XXXX XXXX\".",
+                                            "type": "string"
+                                        },
+                                        "rp_challenge": {
+                                            "description": "Base64url-encoded relying-party challenge (32 bytes).",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "cutoff_days": {
+                                            "description": "Age cutoff in epoch days used by the ZK circuit.",
+                                            "$ref": "#/$defs/CutoffDays"
+                                        },
+                                        "verifying_key_id": {
+                                            "description": "Verifying key identifier selected for this challenge.",
+                                            "$ref": "#/$defs/VkId"
+                                        },
+                                        "submit_secret": {
+                                            "description": "Base64url-encoded submit secret (32 bytes). Required for proof submission.",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "expires_at": {
+                                            "description": "Unix timestamp when this challenge expires.",
+                                            "type": "integer",
+                                            "format": "uint64",
+                                            "minimum": 0
+                                        },
+                                        "proof_direction": {
+                                            "description": "Direction of the age proof: over_age or under_age.",
+                                            "type": "string"
+                                        },
+                                        "status_url": {
+                                            "description": "URL to poll for challenge status updates.",
+                                            "type": "string"
+                                        },
+                                        "verify_url": {
+                                            "description": "URL to submit the zero knowledge proof.",
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "challenge_id",
+                                        "short_code",
+                                        "short_code_formatted",
+                                        "rp_challenge",
+                                        "cutoff_days",
+                                        "verifying_key_id",
+                                        "submit_secret",
+                                        "expires_at",
+                                        "proof_direction",
+                                        "status_url",
+                                        "verify_url"
+                                    ],
+                                    "$defs": {
+                                        "UuidV4": {
+                                            "description": "UUID wrapper constrained to version 4 values.",
+                                            "type": "string",
+                                            "format": "uuid"
+                                        },
+                                        "B64Url32": {
+                                            "description": "Base64url-encoded wrapper around a 32-byte array.",
+                                            "type": "string"
+                                        },
+                                        "CutoffDays": {
+                                            "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                                            "type": "integer",
+                                            "format": "int32"
+                                        },
+                                        "VkId": {
+                                            "description": "Non-zero verifying key identifier.",
+                                            "type": "integer",
+                                            "format": "uint32",
+                                            "minimum": 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Challenge not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Challenge expired",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/challenge/by-code/{code}": {
+            "get": {
+                "summary": "Look up challenge by short code",
+                "description": "Retrieves challenge details using the 12-digit numeric short code (formatted as XXXX XXXX XXXX). Used for manual code entry as an alternative to QR scanning.",
+                "operationId": "challengeByCode",
+                "tags": [
+                    "Challenge"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "code",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "12-digit numeric short code"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Challenge details",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                                    "title": "ChallengeDetailsResponse",
+                                    "description": "Full challenge details returned by `GET /v1/challenge/:id`.\n\nIncludes `submit_secret` because access requires the 122-bit UUID capability\n(obtained via QR deep link), not the lower-entropy short code.",
+                                    "type": "object",
+                                    "properties": {
+                                        "challenge_id": {
+                                            "description": "Unique challenge identifier (UUIDv4).",
+                                            "$ref": "#/$defs/UuidV4"
+                                        },
+                                        "short_code": {
+                                            "description": "12-digit numeric short code for accessibility (displayed as XXXX XXXX XXXX).",
+                                            "type": "string"
+                                        },
+                                        "short_code_formatted": {
+                                            "description": "Human-readable formatted short code: \"XXXX XXXX XXXX\".",
+                                            "type": "string"
+                                        },
+                                        "rp_challenge": {
+                                            "description": "Base64url-encoded relying-party challenge (32 bytes).",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "cutoff_days": {
+                                            "description": "Age cutoff in epoch days used by the ZK circuit.",
+                                            "$ref": "#/$defs/CutoffDays"
+                                        },
+                                        "verifying_key_id": {
+                                            "description": "Verifying key identifier selected for this challenge.",
+                                            "$ref": "#/$defs/VkId"
+                                        },
+                                        "submit_secret": {
+                                            "description": "Base64url-encoded submit secret (32 bytes). Required for proof submission.",
+                                            "$ref": "#/$defs/B64Url32"
+                                        },
+                                        "expires_at": {
+                                            "description": "Unix timestamp when this challenge expires.",
+                                            "type": "integer",
+                                            "format": "uint64",
+                                            "minimum": 0
+                                        },
+                                        "proof_direction": {
+                                            "description": "Direction of the age proof: over_age or under_age.",
+                                            "type": "string"
+                                        },
+                                        "status_url": {
+                                            "description": "URL to poll for challenge status updates.",
+                                            "type": "string"
+                                        },
+                                        "verify_url": {
+                                            "description": "URL to submit the zero knowledge proof.",
+                                            "type": "string"
+                                        }
+                                    },
+                                    "required": [
+                                        "challenge_id",
+                                        "short_code",
+                                        "short_code_formatted",
+                                        "rp_challenge",
+                                        "cutoff_days",
+                                        "verifying_key_id",
+                                        "submit_secret",
+                                        "expires_at",
+                                        "proof_direction",
+                                        "status_url",
+                                        "verify_url"
+                                    ],
+                                    "$defs": {
+                                        "UuidV4": {
+                                            "description": "UUID wrapper constrained to version 4 values.",
+                                            "type": "string",
+                                            "format": "uuid"
+                                        },
+                                        "B64Url32": {
+                                            "description": "Base64url-encoded wrapper around a 32-byte array.",
+                                            "type": "string"
+                                        },
+                                        "CutoffDays": {
+                                            "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                                            "type": "integer",
+                                            "format": "int32"
+                                        },
+                                        "VkId": {
+                                            "description": "Non-zero verifying key identifier.",
+                                            "type": "integer",
+                                            "format": "uint32",
+                                            "minimum": 0
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "No challenge found for this code",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Challenge expired",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/register-test-origin": {
+            "post": {
+                "summary": "Register test origin (sandbox only)",
+                "description": "Registers a new origin for testing in the sandbox environment. Not available in production.",
+                "operationId": "registerTestOrigin",
+                "tags": [
+                    "Sandbox"
+                ],
+                "security": [
+                    {
+                        "ApiKeyAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/RegisterTestOriginRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Origin registered successfully",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/RegisterTestOriginResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Not available in production",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limit exceeded",
+                        "headers": {
+                            "Retry-After": {
+                                "schema": {
+                                    "type": "integer"
+                                },
+                                "description": "Seconds until the rate limit resets"
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/sandbox/simulate-proof": {
+            "post": {
+                "summary": "Simulate proof verification (sandbox only)",
+                "description": "Simulates a wallet proof submission for testing. Only available in sandbox environment.",
+                "operationId": "simulateProof",
+                "tags": [
+                    "Sandbox"
+                ],
+                "security": [],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SimulateProofRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Proof simulation succeeded",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SimulateProofResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request (invalid fields)",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Invalid submit_secret",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Not found (production) or challenge not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Challenge expired or already consumed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/challenge": {
+            "post": {
+                "summary": "Create hosted verification session",
+                "description": "VA-API-006: Initiates a new hosted verification session for the provii-agegate SDK. Creates a PKCE flow, generates a provii-verifier challenge, and returns session details including QR code data.",
+                "operationId": "createHostedChallenge",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "X-Public-Key",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Public key identifier of the relying party (pk_live_* or pk_test_*)."
+                    },
+                    {
+                        "name": "Origin",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Origin of the request. Validated against the allowed origins for the public key."
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/HostedChallengeRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Session created",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HostedChallengeResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Origin not allowed or invalid public key",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limit exceeded",
+                        "headers": {
+                            "Retry-After": {
+                                "schema": {
+                                    "type": "integer"
+                                },
+                                "description": "Seconds until the rate limit resets"
+                            }
+                        },
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/challenge/{id}": {
+            "get": {
+                "summary": "Get hosted challenge details",
+                "description": "VA-API-006: Alias endpoint. Hosted challenge details are returned by the challenge creation endpoint. This path is reserved for future use.",
+                "operationId": "getHostedChallenge",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Challenge identifier"
+                    }
+                ],
+                "responses": {
+                    "404": {
+                        "description": "Not found. Hosted challenges are not individually retrievable via this path.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/status/{session_id}": {
+            "get": {
+                "summary": "Poll hosted session status",
+                "description": "VA-API-006: Returns the current verification state of a hosted session. Used by provii-agegate for polling-based status updates.",
+                "operationId": "getHostedStatus",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Session identifier returned from POST /v1/hosted/challenge"
+                    },
+                    {
+                        "name": "X-Public-Key",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Public key identifier of the relying party."
+                    },
+                    {
+                        "name": "Origin",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Origin of the request."
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Session status",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HostedStatusResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Session expired",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "description": "Rate limit exceeded",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/verify": {
+            "post": {
+                "summary": "Submit proof via hosted flow",
+                "description": "VA-API-006: Proof submission in the hosted flow is handled by the wallet via the expert-mode POST /v1/verify endpoint. This path is documented for completeness but the wallet submits directly to /v1/verify with the submit_secret and challenge_id from the hosted session.",
+                "operationId": "hostedVerify",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Proof accepted. See POST /v1/verify for the full schema.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/VerifyResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/redeem/{session_id}": {
+            "post": {
+                "summary": "Redeem hosted verification session",
+                "description": "VA-API-006: Completes the hosted verification flow. The browser SDK sends the PKCE code_verifier, which is SHA-256 hashed and compared in constant time against the stored code_challenge.",
+                "operationId": "redeemHostedSession",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Session identifier"
+                    },
+                    {
+                        "name": "X-Public-Key",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Public key identifier of the relying party."
+                    },
+                    {
+                        "name": "Origin",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "Origin of the request."
+                    },
+                    {
+                        "name": "X-CSRF-Token",
+                        "in": "header",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "CSRF token from GET /v1/hosted/csrf-token."
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/HostedRedeemRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Session redeemed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HostedRedeemResponse"
+                                }
+                            }
+                        }
+                    },
+                    "400": {
+                        "description": "Bad request (invalid code_verifier format)",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "PKCE mismatch or CSRF validation failure",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "410": {
+                        "description": "Session expired or already redeemed",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/csrf-token": {
+            "get": {
+                "summary": "Generate CSRF token",
+                "description": "VA-API-006: Generates a session-bound CSRF token for use in subsequent mutating hosted requests (redeem, logout). The token is HMAC-signed and bound to the session ID.",
+                "operationId": "getHostedCsrfToken",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "CSRF token generated",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CsrfTokenResponse"
+                                }
+                            }
+                        }
+                    },
+                    "503": {
+                        "description": "CSRF signing key unavailable",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/user/logout": {
+            "post": {
+                "summary": "Terminate hosted session",
+                "description": "VA-API-006: Terminates the user's session by clearing the session cookie and issuing a Clear-Site-Data header. Does not require authentication since sessions are stateless (HMAC-signed tokens).",
+                "operationId": "hostedLogout",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "Session terminated",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HostedLogoutResponse"
+                                }
+                            }
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/v1/hosted/ws/{session_id}": {
+            "get": {
+                "summary": "WebSocket push notifications",
+                "description": "VA-API-006: Upgrades the HTTP connection to a WebSocket for real-time verification status push notifications. Replaces polling for supported clients. Requires a one-time HMAC-signed ticket appended as a query parameter.",
+                "operationId": "hostedWebSocket",
+                "tags": [
+                    "Hosted"
+                ],
+                "security": [],
+                "parameters": [
+                    {
+                        "name": "session_id",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        },
+                        "description": "Session identifier"
+                    },
+                    {
+                        "name": "ticket",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string"
+                        },
+                        "description": "HMAC-signed one-time WebSocket ticket."
+                    }
+                ],
+                "responses": {
+                    "101": {
+                        "description": "Switching Protocols (WebSocket upgrade)"
+                    },
+                    "403": {
+                        "description": "Invalid or expired ticket",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ErrorResponse"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "CreateChallengeRequest": {
+                "$defs": {
+                    "B64Url32": {
+                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                        "type": "string"
+                    },
+                    "PkceMethod": {
+                        "description": "Supported PKCE code challenge methods.",
+                        "type": "string",
+                        "enum": [
+                            "S256"
+                        ]
+                    },
+                    "VkId": {
+                        "description": "Non-zero verifying key identifier.",
+                        "type": "integer",
+                        "format": "uint32",
+                        "minimum": 0
+                    },
+                    "ExpiresIn": {
+                        "description": "TTL for a challenge, clamped to `[MIN, MAX]` on construction.",
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                    },
+                    "Authorizer": {
+                        "description": "Shared HMAC-based authorizer used by relying parties when calling the API.\n\nSECURITY: `hmac` and `nonce` are secret authentication material. The `Debug`\nimpl redacts them to prevent accidental logging (ASVS V11.7.2).\n`Zeroize` + `ZeroizeOnDrop` ensure they are cleared from memory on drop.",
+                        "type": "object",
+                        "properties": {
+                            "keyId": {
+                                "description": "Identifier of the client credential used to authenticate the request.",
+                                "type": "string"
+                            },
+                            "timestamp": {
+                                "description": "Unix timestamp (seconds) included in the canonical signing payload.",
+                                "type": "integer",
+                                "format": "uint64",
+                                "minimum": 0
+                            },
+                            "hmac": {
+                                "description": "Hex-encoded HMAC (SHA-256) over the canonical message.",
+                                "type": "string"
+                            },
+                            "nonce": {
+                                "description": "SECURITY: Cryptographic nonce for replay protection (64 hex chars / 256 bits).\nRequired for nonce-based replay attack prevention (ASVS V6.1.3).",
+                                "type": "string"
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "keyId",
+                            "timestamp",
+                            "hmac",
+                            "nonce"
+                        ]
+                    }
+                },
+                "required": [
+                    "code_challenge",
+                    "authorizer"
+                ],
+                "description": "Request body for `POST /v1/challenge`.\n\nSECURITY: The `authorizer` field carries the HMAC-SHA256 signature, nonce, and\ntimestamp that authenticate the caller. The `code_challenge` binds the session\nto the PKCE flow so proof submission requires the matching code verifier.",
+                "type": "object",
+                "properties": {
+                    "code_challenge": {
+                        "description": "PKCE code challenge encoded as base64url (exactly 32 bytes).",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "method": {
+                        "description": "PKCE method. Only S256 is supported.",
+                        "$ref": "#/$defs/PkceMethod",
+                        "default": "S256"
+                    },
+                    "verifying_key_id": {
+                        "description": "Optional verifying key identifier, validated against the origin policy.",
+                        "anyOf": [
+                            {
+                                "$ref": "#/$defs/VkId"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null
+                    },
+                    "expires_in": {
+                        "description": "Requested challenge lifetime in seconds (clamped to policy and system limits).",
+                        "$ref": "#/$defs/ExpiresIn",
+                        "default": 300
+                    },
+                    "authorizer": {
+                        "description": "HMAC authentication envelope (key_id, timestamp, hmac, nonce).",
+                        "$ref": "#/$defs/Authorizer"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ChallengeResponse": {
+                "$defs": {
+                    "UuidV4": {
+                        "description": "UUID wrapper constrained to version 4 values.",
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "B64Url32": {
+                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                        "type": "string"
+                    },
+                    "CutoffDays": {
+                        "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                        "type": "integer",
+                        "format": "int32"
+                    },
+                    "VkId": {
+                        "description": "Non-zero verifying key identifier.",
+                        "type": "integer",
+                        "format": "uint32",
+                        "minimum": 0
+                    }
+                },
+                "required": [
+                    "challenge_id",
+                    "short_code",
+                    "short_code_formatted",
+                    "rp_challenge",
+                    "cutoff_days",
+                    "verifying_key_id",
+                    "submit_secret",
+                    "expires_at",
+                    "proof_direction",
+                    "status_url",
+                    "verify_url"
+                ],
+                "description": "Successful response from `POST /v1/challenge`.\n\nContains everything the client needs to display a QR code (or short code)\nand later submit a zero knowledge proof against `rp_challenge`.",
+                "type": "object",
+                "properties": {
+                    "challenge_id": {
+                        "description": "Unique challenge identifier (UUIDv4).",
+                        "$ref": "#/$defs/UuidV4"
+                    },
+                    "short_code": {
+                        "description": "12-digit numeric short code for accessibility (displayed as XXXX XXXX XXXX).",
+                        "type": "string"
+                    },
+                    "short_code_formatted": {
+                        "description": "Human-readable formatted short code: \"XXXX XXXX XXXX\".",
+                        "type": "string"
+                    },
+                    "rp_challenge": {
+                        "description": "Base64url-encoded relying-party challenge (32 bytes).",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "cutoff_days": {
+                        "description": "Age cutoff in epoch days used by the ZK circuit.",
+                        "$ref": "#/$defs/CutoffDays"
+                    },
+                    "verifying_key_id": {
+                        "description": "Verifying key identifier selected for this challenge.",
+                        "$ref": "#/$defs/VkId"
+                    },
+                    "submit_secret": {
+                        "description": "Base64url-encoded submit secret (32 bytes). Required for proof submission.",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "expires_at": {
+                        "description": "Unix timestamp when this challenge expires.",
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                    },
+                    "proof_direction": {
+                        "description": "Direction of the age proof: over_age or under_age.",
+                        "type": "string"
+                    },
+                    "status_url": {
+                        "description": "URL to poll for challenge status updates.",
+                        "type": "string"
+                    },
+                    "verify_url": {
+                        "description": "URL to submit the zero knowledge proof.",
+                        "type": "string"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "ChallengeDetailsResponse": {
+                "$defs": {
+                    "UuidV4": {
+                        "description": "UUID wrapper constrained to version 4 values.",
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "B64Url32": {
+                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                        "type": "string"
+                    },
+                    "CutoffDays": {
+                        "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                        "type": "integer",
+                        "format": "int32"
+                    },
+                    "VkId": {
+                        "description": "Non-zero verifying key identifier.",
+                        "type": "integer",
+                        "format": "uint32",
+                        "minimum": 0
+                    }
+                },
+                "required": [
+                    "challenge_id",
+                    "short_code",
+                    "short_code_formatted",
+                    "rp_challenge",
+                    "cutoff_days",
+                    "verifying_key_id",
+                    "submit_secret",
+                    "expires_at",
+                    "proof_direction",
+                    "status_url",
+                    "verify_url"
+                ],
+                "description": "Full challenge details returned by `GET /v1/challenge/:id`.\n\nIncludes `submit_secret` because access requires the 122-bit UUID capability\n(obtained via QR deep link), not the lower-entropy short code.",
+                "type": "object",
+                "properties": {
+                    "challenge_id": {
+                        "description": "Unique challenge identifier (UUIDv4).",
+                        "$ref": "#/$defs/UuidV4"
+                    },
+                    "short_code": {
+                        "description": "12-digit numeric short code for accessibility (displayed as XXXX XXXX XXXX).",
+                        "type": "string"
+                    },
+                    "short_code_formatted": {
+                        "description": "Human-readable formatted short code: \"XXXX XXXX XXXX\".",
+                        "type": "string"
+                    },
+                    "rp_challenge": {
+                        "description": "Base64url-encoded relying-party challenge (32 bytes).",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "cutoff_days": {
+                        "description": "Age cutoff in epoch days used by the ZK circuit.",
+                        "$ref": "#/$defs/CutoffDays"
+                    },
+                    "verifying_key_id": {
+                        "description": "Verifying key identifier selected for this challenge.",
+                        "$ref": "#/$defs/VkId"
+                    },
+                    "submit_secret": {
+                        "description": "Base64url-encoded submit secret (32 bytes). Required for proof submission.",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "expires_at": {
+                        "description": "Unix timestamp when this challenge expires.",
+                        "type": "integer",
+                        "format": "uint64",
+                        "minimum": 0
+                    },
+                    "proof_direction": {
+                        "description": "Direction of the age proof: over_age or under_age.",
+                        "type": "string"
+                    },
+                    "status_url": {
+                        "description": "URL to poll for challenge status updates.",
+                        "type": "string"
+                    },
+                    "verify_url": {
+                        "description": "URL to submit the zero knowledge proof.",
+                        "type": "string"
+                    }
+                }
+            },
+            "SubmitProofRequest": {
+                "$defs": {
+                    "UuidV4": {
+                        "description": "UUID wrapper constrained to version 4 values.",
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "B64Url32": {
+                        "description": "Base64url-encoded wrapper around a 32-byte array.",
+                        "type": "string"
+                    },
+                    "AgeProofJson": {
+                        "description": "Groth16 age proof with its associated public inputs.",
+                        "type": "object",
+                        "properties": {
+                            "verifying_key_id": {
+                                "description": "Identifier selecting the verifying key registered for this origin.",
+                                "$ref": "#/$defs/VkId"
+                            },
+                            "public": {
+                                "description": "Public inputs fed into the Groth16 verifier.",
+                                "$ref": "#/$defs/PublicInputsJson"
+                            },
+                            "proof": {
+                                "description": "Groth16 proof bytes (base64url, exactly 192 bytes decoded).",
+                                "$ref": "#/$defs/B64Url192"
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "verifying_key_id",
+                            "public",
+                            "proof"
+                        ]
+                    },
+                    "VkId": {
+                        "description": "Non-zero verifying key identifier.",
+                        "type": "integer",
+                        "format": "uint32",
+                        "minimum": 0
+                    },
+                    "PublicInputsJson": {
+                        "description": "Public inputs that the SNARK circuit constrains.\n\nEvery field is re-validated against the stored challenge record before the\nproof is passed to the Groth16 verifier.",
+                        "type": "object",
+                        "properties": {
+                            "cutoff_days": {
+                                "description": "Minimum age threshold in days (e.g. 6570 for 18 years).",
+                                "$ref": "#/$defs/CutoffDays"
+                            },
+                            "rp_challenge": {
+                                "description": "Relying-party challenge (base64url, 32 bytes). Blake2s-256 hashed before circuit input.",
+                                "$ref": "#/$defs/B64Url32"
+                            },
+                            "issuer": {
+                                "description": "Issuer verifying key.",
+                                "$ref": "#/$defs/IssuerKeyJson"
+                            },
+                            "cred_nullifier": {
+                                "description": "Credential nullifier (base64url, 32 bytes). Checked against the ban list.",
+                                "$ref": "#/$defs/B64Url32"
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "cutoff_days",
+                            "rp_challenge",
+                            "issuer",
+                            "cred_nullifier"
+                        ]
+                    },
+                    "CutoffDays": {
+                        "description": "Strongly typed wrapper around a cutoff expressed in epoch days.",
+                        "type": "integer",
+                        "format": "int32"
+                    },
+                    "IssuerKeyJson": {
+                        "description": "Issuer verifying key transmitted as raw bytes (not a hash).",
+                        "type": "object",
+                        "properties": {
+                            "value": {
+                                "description": "Raw RedJubjub verifying key bytes (base64url-encoded, 32 bytes).\nFed directly as public inputs 4 and 5 of the Groth16 circuit.",
+                                "$ref": "#/$defs/B64Url32"
+                            }
+                        },
+                        "additionalProperties": false,
+                        "required": [
+                            "value"
+                        ]
+                    },
+                    "B64Url192": {
+                        "description": "Base64url-encoded wrapper around a 192-byte array.",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "challenge_id",
+                    "submit_secret",
+                    "proof"
+                ],
+                "description": "Top-level request body for `POST /v1/verify`.\n\nAll fields are required. Unknown fields are rejected at deserialisation.",
+                "type": "object",
+                "properties": {
+                    "challenge_id": {
+                        "description": "Challenge UUID returned from `POST /v1/challenge`.",
+                        "$ref": "#/$defs/UuidV4"
+                    },
+                    "submit_secret": {
+                        "description": "Anti-abuse secret (base64url, 32 bytes). Compared in constant time.",
+                        "$ref": "#/$defs/B64Url32"
+                    },
+                    "proof": {
+                        "description": "The Groth16 age proof and its public inputs.",
+                        "$ref": "#/$defs/AgeProofJson"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "VerifyResponse": {
+                "required": [
+                    "result",
+                    "state"
+                ],
+                "properties": {
+                    "result": {
+                        "description": "`\"OK\"` on success, or an error code such as `\"INVALID_PROOF\"`.",
+                        "type": "string"
+                    },
+                    "state": {
+                        "description": "Current challenge state, e.g. `\"proof_ok_waiting_for_redeem\"`.",
+                        "type": "string"
+                    }
+                },
+                "description": "JSON response returned from `POST /v1/verify`.",
+                "type": "object"
+            },
+            "RedeemRequest": {
+                "$defs": {
+                    "PkceCodeVerifier": {
+                        "description": "PKCE `code_verifier` value constrained to the RFC 7636 character set.\n\nSECURITY: The code verifier is a high-entropy secret used exactly once.\nIt is zeroised on drop and redacted in Debug output.",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "code_verifier"
+                ],
+                "description": "Request body for `POST /v1/challenge/:session_id/redeem`.",
+                "type": "object",
+                "properties": {
+                    "code_verifier": {
+                        "description": "PKCE code verifier (43-128 unreserved characters, RFC 7636 appendix B).",
+                        "$ref": "#/$defs/PkceCodeVerifier"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "RedeemResponse": {
+                "required": [
+                    "result",
+                    "verified"
+                ],
+                "properties": {
+                    "result": {
+                        "description": "`\"OK\"` on success.",
+                        "type": "string"
+                    },
+                    "verified": {
+                        "description": "`true` when the challenge has been successfully redeemed.",
+                        "type": "boolean"
+                    }
+                },
+                "description": "JSON response returned from `POST /v1/challenge/:session_id/redeem`.",
+                "type": "object"
+            },
+            "ChallengeStatus": {
+                "required": [
+                    "state",
+                    "status",
+                    "verified",
+                    "proof_verified"
+                ],
+                "properties": {
+                    "state": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string"
+                    },
+                    "verified": {
+                        "type": "boolean"
+                    },
+                    "proof_verified": {
+                        "type": "boolean"
+                    }
+                },
+                "type": "object"
+            },
+            "ErrorResponse": {
+                "description": "ADV-VA-05-012: Canonical 5-key error envelope serialised by all error paths.",
+                "required": [
+                    "error",
+                    "request_id"
+                ],
+                "properties": {
+                    "error": {
+                        "type": "string",
+                        "description": "Human-readable error message."
+                    },
+                    "code": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Machine-readable error code (e.g. ORIGIN_MISSING, INVALID_PKCE_CHALLENGE)."
+                    },
+                    "field": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Name of the offending request field, if applicable."
+                    },
+                    "detail": {
+                        "type": [
+                            "string",
+                            "null"
+                        ],
+                        "description": "Safe human-readable diagnostic detail. Never contains secret material."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Unique request identifier for correlation."
+                    }
+                },
+                "type": "object"
+            },
+            "HealthCheckResponse": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "healthy",
+                            "degraded",
+                            "unhealthy"
+                        ]
+                    },
+                    "timestamp": {
+                        "type": "integer",
+                        "description": "Unix timestamp in seconds"
+                    },
+                    "version": {
+                        "type": "string"
+                    },
+                    "checks": {
+                        "type": "object",
+                        "properties": {
+                            "challenge_store": {
+                                "$ref": "#/components/schemas/SubsystemHealth"
+                            },
+                            "nonce_store": {
+                                "$ref": "#/components/schemas/SubsystemHealth"
+                            },
+                            "jwks_cache": {
+                                "$ref": "#/components/schemas/SubsystemHealth"
+                            },
+                            "rate_limiter": {
+                                "$ref": "#/components/schemas/SubsystemHealth"
+                            },
+                            "ban_store": {
+                                "$ref": "#/components/schemas/SubsystemHealth"
+                            }
+                        }
+                    }
+                }
+            },
+            "SubsystemHealth": {
+                "type": "object",
+                "properties": {
+                    "operational": {
+                        "type": "boolean"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "metrics": {
+                        "type": "object"
+                    }
+                },
+                "required": [
+                    "operational"
+                ]
+            },
+            "CspReport": {
+                "type": "object",
+                "required": [
+                    "csp-report"
+                ],
+                "properties": {
+                    "csp-report": {
+                        "type": "object",
+                        "properties": {
+                            "document-uri": {
+                                "type": "string"
+                            },
+                            "referrer": {
+                                "type": "string"
+                            },
+                            "blocked-uri": {
+                                "type": "string"
+                            },
+                            "violated-directive": {
+                                "type": "string"
+                            },
+                            "effective-directive": {
+                                "type": "string"
+                            },
+                            "original-policy": {
+                                "type": "string"
+                            },
+                            "disposition": {
+                                "type": "string"
+                            },
+                            "status-code": {
+                                "type": "integer"
+                            },
+                            "script-sample": {
+                                "type": "string"
+                            },
+                            "source-file": {
+                                "type": "string"
+                            },
+                            "line-number": {
+                                "type": "integer"
+                            },
+                            "column-number": {
+                                "type": "integer"
+                            }
+                        }
+                    }
+                }
+            },
+            "RegisterTestOriginRequest": {
+                "type": "object",
+                "required": [
+                    "origin",
+                    "api_key"
+                ],
+                "properties": {
+                    "origin": {
+                        "type": "string",
+                        "description": "Origin URL to register for testing"
+                    },
+                    "min_age_years": {
+                        "type": "integer",
+                        "default": 18,
+                        "minimum": 0,
+                        "maximum": 150,
+                        "description": "Minimum age in years (default 18). Used for over_age proofs."
+                    },
+                    "api_key": {
+                        "type": "string",
+                        "description": "API key for the test origin"
+                    },
+                    "contact_email": {
+                        "type": "string",
+                        "description": "Optional contact email"
+                    },
+                    "proof_direction": {
+                        "type": "string",
+                        "enum": [
+                            "over_age",
+                            "under_age"
+                        ],
+                        "default": "over_age",
+                        "description": "Proof direction. Defaults to over_age."
+                    },
+                    "max_age_years": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 150,
+                        "description": "Maximum age in years. Required when proof_direction is under_age."
+                    }
+                }
+            },
+            "RegisterTestOriginResponse": {
+                "type": "object",
+                "properties": {
+                    "success": {
+                        "type": "boolean"
+                    },
+                    "message": {
+                        "type": "string"
+                    },
+                    "origin": {
+                        "type": "string"
+                    },
+                    "hmac_secret": {
+                        "type": "string",
+                        "description": "Returned only on first registration"
+                    },
+                    "client_id": {
+                        "type": "string",
+                        "description": "Returned only on first registration"
+                    },
+                    "security_note": {
+                        "type": "string"
+                    },
+                    "expires_at": {
+                        "type": "integer",
+                        "description": "Unix timestamp when the registration expires"
+                    },
+                    "ttl_seconds": {
+                        "type": "integer",
+                        "description": "Time-to-live in seconds"
+                    },
+                    "already_existed": {
+                        "type": "boolean",
+                        "description": "True if the origin was already registered (idempotent hit)"
+                    },
+                    "test_instructions": {
+                        "type": "object",
+                        "properties": {
+                            "endpoint": {
+                                "type": "string"
+                            },
+                            "example_curl": {
+                                "type": "string"
+                            },
+                            "example_javascript": {
+                                "type": "string"
+                            },
+                            "agegate_js_snippet": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            },
+            "SimulateProofRequest": {
+                "type": "object",
+                "required": [
+                    "challenge_id",
+                    "submit_secret",
+                    "outcome"
+                ],
+                "properties": {
+                    "challenge_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Challenge UUID to simulate proof for"
+                    },
+                    "submit_secret": {
+                        "type": "string",
+                        "description": "Base64url-encoded 32-byte submit secret (43 characters)"
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": [
+                            "verified",
+                            "age_not_met"
+                        ],
+                        "description": "Desired simulation outcome"
+                    }
+                }
+            },
+            "SimulateProofResponse": {
+                "type": "object",
+                "required": [
+                    "result",
+                    "state"
+                ],
+                "properties": {
+                    "result": {
+                        "type": "string",
+                        "description": "Always ok on success"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "Resulting challenge state after simulation"
+                    }
+                }
+            },
+            "HostedChallengeRequest": {
+                "description": "VA-API-006: Request body for POST /v1/hosted/challenge.",
+                "type": "object",
+                "properties": {
+                    "publicKey": {
+                        "type": "string",
+                        "description": "Public key identifier (also accepted via X-Public-Key header).",
+                        "maxLength": 128
+                    },
+                    "origin": {
+                        "type": "string",
+                        "description": "Origin (auto-extracted from Origin header if omitted).",
+                        "maxLength": 256
+                    },
+                    "codeChallenge": {
+                        "type": "string",
+                        "description": "PKCE code challenge (SHA-256 hash of code_verifier, base64url). Auto-generated if omitted.",
+                        "maxLength": 128
+                    },
+                    "codeChallengeMethod": {
+                        "type": "string",
+                        "description": "PKCE method (must be S256).",
+                        "default": "S256",
+                        "enum": [
+                            "S256"
+                        ]
+                    },
+                    "environment": {
+                        "type": "string",
+                        "description": "Target environment.",
+                        "default": "production",
+                        "enum": [
+                            "production",
+                            "sandbox"
+                        ]
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "description": "Optional analytics metadata.",
+                        "properties": {
+                            "user_agent": {
+                                "type": "string",
+                                "maxLength": 500
+                            },
+                            "sdk_version": {
+                                "type": "string",
+                                "maxLength": 50
+                            }
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "HostedChallengeResponse": {
+                "description": "VA-API-006: Response from POST /v1/hosted/challenge.",
+                "type": "object",
+                "required": [
+                    "session_id",
+                    "challenge_id",
+                    "qr_code_url",
+                    "challenge_code",
+                    "short_code",
+                    "expires_at",
+                    "status",
+                    "rp_challenge",
+                    "submit_secret",
+                    "cutoff_days",
+                    "verifying_key_id",
+                    "status_url",
+                    "verify_url",
+                    "proof_direction"
+                ],
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Unique session identifier."
+                    },
+                    "challenge_id": {
+                        "type": "string",
+                        "description": "Challenge ID from the underlying provii-verifier challenge."
+                    },
+                    "qr_code_url": {
+                        "type": "string",
+                        "description": "URL for QR code scanning."
+                    },
+                    "challenge_code": {
+                        "type": "string",
+                        "description": "Human-readable challenge code (e.g. 1234-5678-9012)."
+                    },
+                    "short_code": {
+                        "type": "string",
+                        "description": "12-digit short code for accessibility (raw, without dashes)."
+                    },
+                    "short_code_formatted": {
+                        "type": "string",
+                        "description": "Formatted short code (e.g. 1234 5678 9012)."
+                    },
+                    "expires_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Session expiry (Unix timestamp seconds)."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Current session status."
+                    },
+                    "rp_challenge": {
+                        "type": "string",
+                        "description": "Base64url-encoded relying-party challenge (43 chars)."
+                    },
+                    "submit_secret": {
+                        "type": "string",
+                        "description": "Base64url-encoded submit secret for proof submission (43 chars)."
+                    },
+                    "cutoff_days": {
+                        "type": "integer",
+                        "format": "int32",
+                        "description": "Age cutoff in epoch days (e.g. 6570 for 18 years)."
+                    },
+                    "verifying_key_id": {
+                        "type": "integer",
+                        "format": "uint32",
+                        "description": "Verifying key ID for the ZK circuit."
+                    },
+                    "status_url": {
+                        "type": "string",
+                        "description": "URL to poll for status updates."
+                    },
+                    "verify_url": {
+                        "type": "string",
+                        "description": "URL to submit the zero knowledge proof."
+                    },
+                    "proof_direction": {
+                        "type": "string",
+                        "description": "Proof direction: over_age or under_age.",
+                        "enum": [
+                            "over_age",
+                            "under_age"
+                        ]
+                    },
+                    "csrf_token": {
+                        "type": "string",
+                        "description": "CSRF token for subsequent mutating requests (omitted if CSRF protection is disabled)."
+                    },
+                    "ws_url": {
+                        "type": "string",
+                        "description": "WebSocket URL for push notifications (wss://{origin}/v1/hosted/ws/{session_id})."
+                    }
+                }
+            },
+            "HostedStatusResponse": {
+                "description": "VA-API-006: Response from GET /v1/hosted/status/{session_id}.",
+                "type": "object",
+                "required": [
+                    "session_id",
+                    "status",
+                    "created_at",
+                    "expires_at",
+                    "proof_verified"
+                ],
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session identifier."
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Current session state (pending, proof_ok, verified, expired).",
+                        "enum": [
+                            "pending",
+                            "proof_ok",
+                            "verified",
+                            "expired"
+                        ]
+                    },
+                    "created_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Session creation time (Unix timestamp seconds)."
+                    },
+                    "expires_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Session expiry (Unix timestamp seconds)."
+                    },
+                    "proof_verified": {
+                        "type": "boolean",
+                        "description": "Whether the proof has been verified."
+                    },
+                    "complete": {
+                        "type": "boolean",
+                        "description": "Whether verification is complete."
+                    },
+                    "error": {
+                        "type": "string",
+                        "description": "Error message if verification failed."
+                    },
+                    "poll_after": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Suggested next poll time (Unix timestamp seconds)."
+                    },
+                    "remaining_checks": {
+                        "type": "integer",
+                        "format": "uint32",
+                        "description": "Remaining status checks before rate limit."
+                    }
+                }
+            },
+            "HostedRedeemRequest": {
+                "description": "VA-API-006: Request body for POST /v1/hosted/redeem/{session_id}.",
+                "type": "object",
+                "required": [
+                    "code_verifier"
+                ],
+                "properties": {
+                    "code_verifier": {
+                        "type": "string",
+                        "description": "PKCE code verifier (43-128 unreserved characters, RFC 7636 appendix B)."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "HostedRedeemResponse": {
+                "description": "VA-API-006: Response from POST /v1/hosted/redeem/{session_id}.",
+                "type": "object",
+                "required": [
+                    "status",
+                    "verified_at",
+                    "expires_at"
+                ],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Session state, always verified on success."
+                    },
+                    "verified_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "When verification completed (Unix timestamp seconds)."
+                    },
+                    "expires_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "When the session expires (Unix timestamp seconds)."
+                    }
+                }
+            },
+            "CsrfTokenResponse": {
+                "description": "VA-API-006: Response from GET /v1/hosted/csrf-token.",
+                "type": "object",
+                "required": [
+                    "csrf_token",
+                    "expires_at",
+                    "expires_in"
+                ],
+                "properties": {
+                    "csrf_token": {
+                        "type": "string",
+                        "description": "CSRF token to include in X-CSRF-Token header on subsequent mutating requests."
+                    },
+                    "expires_at": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Token expiry (Unix timestamp seconds)."
+                    },
+                    "expires_in": {
+                        "type": "integer",
+                        "format": "uint64",
+                        "description": "Token validity duration in seconds."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "HostedLogoutResponse": {
+                "description": "VA-API-006: Response from POST /v1/hosted/user/logout.",
+                "type": "object",
+                "required": [
+                    "status",
+                    "message"
+                ],
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "description": "Logout outcome, always logged_out on success."
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Human-readable confirmation message."
+                    }
+                }
+            }
+        },
+        "securitySchemes": {
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "API key issued to relying parties. Verified via Argon2id (provii-verifier/src/security/auth.rs:412). Expert verifiers additionally embed an `Authorizer` envelope (key_id + timestamp + nonce + HMAC-SHA256 over the canonical request body) inside the request payload, not as a separate header. See provii-verifier/src/security/auth.rs:664 (verify_hmac) and provii-verifier/src/types/auth.rs."
+            }
+        }
+    }
+}

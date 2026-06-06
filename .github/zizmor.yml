@@ -1,0 +1,57 @@
+# Zizmor configuration for provii-verifier
+#
+# Suppressions for findings that are either mitigated in-place or required
+# by the workflow's design. Each entry has a justification.
+
+rules:
+  cache-poisoning:
+    # Swatinem/rust-cache is used across build, test, and deploy jobs.
+    # Tag-triggered builds (release path) have explicit `if:` guards that
+    # skip cache restore, preventing poisoned caches from reaching signed
+    # artefacts. Non-release builds accept the residual risk of a cache
+    # hit from an earlier branch push since the output is never published.
+    ignore:
+      - deploy.yml
+      - ci.yml
+      - release.yml
+      - sbom.yml
+
+  excessive-permissions:
+    # cla.yml: contents:write + pull-requests:write + statuses:write are
+    # the minimum set required by contributor-assistant/github-action to
+    # commit signature records, post CLA comments, and set PR status.
+    # security-audit.yml: security-events:write is needed for SARIF upload
+    # to GitHub Code Scanning (Trivy, Semgrep).
+    ignore:
+      - cla.yml
+      - security-audit.yml
+
+  dangerous-triggers:
+    # cla.yml: pull_request_target is required by contributor-assistant
+    # to access secrets and write CLA signature records.
+    # prod-bundle-check.yml: workflow_run is required to consume the
+    # production WASM artefact from the upstream CI/CD Pipeline.
+    ignore:
+      - cla.yml
+      - prod-bundle-check.yml
+
+  unpinned-uses:
+    # deploy.yml: cargo-bins/cargo-binstall container action is versioned
+    # by tag; SHA-pinning is impractical for container actions.
+    # release.yml: SLSA generator must use tag refs per specification.
+    ignore:
+      - deploy.yml
+      - release.yml
+
+  template-injection:
+    # deploy.yml uses step outputs and github.sha in Step Summary heredocs.
+    # All interpolated values are either enum (job.status), hex SHA, or
+    # hashes computed by prior steps - none are user-controlled.
+    ignore:
+      - deploy.yml
+
+  archived-uses:
+    # contributor-assistant/github-action is archived but still
+    # functional and SHA-pinned. No maintained alternative exists.
+    ignore:
+      - cla.yml
